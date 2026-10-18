@@ -68,6 +68,8 @@ class SkyKinDialerApp {
     this.isHeld = false;
     this.ringbackCtx = null;
     this.ringbackInterval = null;
+    this.selectedCampaignIds = [1];
+    this.selectedCampaigns = [];
 
     this.initElements();
     this.initEventListeners();
@@ -77,6 +79,8 @@ class SkyKinDialerApp {
       console.warn('SIP Telephony init error:', e);
     }
     this.loadCampaignData();
+    this.loadCampaignsOverview();
+    this.loadCallbacksList();
   }
 
   initElements() {
@@ -150,8 +154,8 @@ class SkyKinDialerApp {
     }
 
     // Lead Search & Filter
-    document.getElementById('leadSearchInput')?.addEventListener('input', (e) => this.renderLeadsTables(e.target.value));
-    document.getElementById('leadStatusFilter')?.addEventListener('change', (e) => this.renderLeadsTables('', e.target.value));
+    document.getElementById('leadSearchInput')?.addEventListener('input', () => this.renderLeadsTables());
+    document.getElementById('leadStatusFilter')?.addEventListener('change', () => this.renderLeadsTables());
   }
 
   /* ─────────────────────────────────────────────────────────
@@ -212,13 +216,14 @@ class SkyKinDialerApp {
     this.wsUri = wsUri;
 
     const startBridge = (tries = 0) => {
-      const SIP = window.SIPjs;
+      const SIP = window.SIPjs || window.SIP;
+      if (window.SIP && !window.SIPjs) window.SIPjs = window.SIP;
       if (!SIP || !SIP.UserAgent) {
         if (tries < 30) {
           setTimeout(() => startBridge(tries + 1), 150);
           return;
         }
-        this.updateSipStatus('failed', 'SIP library not loaded');
+        this.updateSipStatus('failed', 'SIP softphone standby');
         return;
       }
 
@@ -390,7 +395,7 @@ class SkyKinDialerApp {
 
   async sipMakeCall(rawTarget, dom, callbacks = {}, lineNum = 1) {
     const lineObj = (lineNum === 2 && this.line2.enabled) ? this.line2 : this.line1;
-    const SIP = window.SIPjs;
+    const SIP = window.SIPjs || window.SIP;
 
     if (!lineObj.ua || !SIP) {
       if (callbacks.onError) callbacks.onError(new Error(`Line ${lineObj.num} SIP not initialized`));
@@ -638,7 +643,7 @@ class SkyKinDialerApp {
     const hangupSession = (lineObj) => {
       if (lineObj && lineObj.session) {
         try {
-          const SIP = window.SIPjs;
+          const SIP = window.SIPjs || window.SIP;
           const s = lineObj.session;
           if (s.state === SIP?.SessionState?.Established || s.state === 'Established') {
             if (s.bye) s.bye();
@@ -744,8 +749,30 @@ class SkyKinDialerApp {
     document.getElementById(modalId)?.classList.add('open');
   }
 
+  closeModal(modalId) {
+    if (modalId) {
+      document.getElementById(modalId)?.classList.remove('open');
+    } else {
+      this.closeAllModals();
+    }
+  }
+
   closeAllModals() {
     document.querySelectorAll('.modal-backdrop').forEach(m => m.classList.remove('open'));
+  }
+
+  handleSingleAddSubmit(e) { return this.handleModalSingleAdd(e); }
+  handleUploadSubmit(e) { return this.handleFileUpload(e); }
+  handleManualSubmit(e) { return this.handleManualUpload(e); }
+  handleAudioUploadSubmit(e) { return this.handleAudioUpload(e); }
+
+  exportContactsCsv() {
+    window.location.href = 'api.php?action=export_contacts_csv&campaign_id=' + (this.campaign?.id || 1);
+  }
+
+  async loadReportsAndLogs() {
+    await this.loadCampaignData();
+    this.renderHistoryTable();
   }
 
   showToast(message, type = 'info') {
@@ -765,13 +792,32 @@ class SkyKinDialerApp {
   /* ─────────────────────────────────────────────────────────
      Data Loading & Queue Manager
      ───────────────────────────────────────────────────────── */
-  async loadCampaignData() {
+  async loadCampaignData(campaignInput = null) {
     try {
-      const res = await fetch('api.php?action=get_campaign_data&campaign_id=1');
+      let ids = [];
+      if (Array.isArray(campaignInput)) {
+        ids = campaignInput.map(Number).filter(n => n > 0);
+      } else if (typeof campaignInput === 'string' && campaignInput.includes(',')) {
+        ids = campaignInput.split(',').map(Number).filter(n => n > 0);
+      } else if (campaignInput !== null && campaignInput !== undefined) {
+        ids = [Number(campaignInput)];
+      } else if (this.selectedCampaignIds && this.selectedCampaignIds.length > 0) {
+        ids = this.selectedCampaignIds.map(Number);
+      } else {
+        ids = [this.activeCampaignId || this.campaign?.id || 1];
+      }
+
+      this.selectedCampaignIds = ids;
+      if (ids.length === 1) {
+        this.activeCampaignId = ids[0];
+      }
+
+      const res = await fetch(`api.php?action=get_campaign_data&campaign_ids=${encodeURIComponent(ids.join(','))}`);
       const data = await res.json();
       if (!data.success) throw new Error(data.error || 'Failed to load');
 
       this.campaign = data.campaign;
+      this.selectedCampaigns = data.selected_campaigns || (data.campaign ? [data.campaign] : []);
       this.leads = data.leads || [];
       this.stats = data.stats || {};
       this.audioRecordings = data.audio_recordings || [];
@@ -781,6 +827,7 @@ class SkyKinDialerApp {
       this.remainingCount = data.remaining_count || 0;
 
       this.renderCampaignHeader();
+      this.renderDialerCampaignSelector();
       this.renderStats();
       this.renderLeadsTables();
       this.renderActiveChannels();
@@ -789,10 +836,1087 @@ class SkyKinDialerApp {
       this.renderHistoryTable();
       this.populateAudioDropdown();
       this.updateRolloverBanners();
+
+      // Phase 1 updates
+      this.loadCampaignsOverview();
+      this.updateDesignerUI();
+
+      // Phase 2 updates
+      this.renderAgentScreen();
+
+      // Phase 3 & 4 updates
+      this.loadCallbacksList();
+      this.loadDncList();
     } catch (err) {
       console.error(err);
       this.showToast('Could not load campaign data', 'error');
     }
+  }
+
+  renderDialerCampaignSelector() {
+    const sel = document.getElementById('dialerCampaignDropdown');
+    const badge = document.getElementById('dialerSelectedCampaignsBadge');
+    const queueBadge = document.getElementById('dialerQueueCountBadge');
+    const cbList = document.getElementById('multiCampaignCheckboxesList');
+
+    const campaigns = this.allCampaigns || this.selectedCampaigns || [];
+    const selectedIds = (this.selectedCampaignIds || [1]).map(Number);
+    const isMulti = selectedIds.length > 1;
+
+    // Update Dropdown
+    if (sel && campaigns.length > 0) {
+      let optionsHtml = '';
+      if (isMulti) {
+        optionsHtml += `<option value="multi" selected>📋 Multiple Campaigns (${selectedIds.length} Selected)</option>`;
+      }
+      campaigns.forEach(c => {
+        const isSelected = !isMulti && selectedIds.includes(Number(c.id));
+        const count = c.total_leads_count || c.total_leads || 0;
+        optionsHtml += `<option value="${c.id}" ${isSelected ? 'selected' : ''}>${this.escapeHtml(c.name)} &middot; ${count} lead${count === 1 ? '' : 's'}</option>`;
+      });
+      optionsHtml += `<option value="all">⚡ Select All Campaigns Combined</option>`;
+      sel.innerHTML = optionsHtml;
+    }
+
+    // Update Checkboxes Drawer
+    if (cbList && campaigns.length > 0) {
+      cbList.innerHTML = campaigns.map(c => {
+        const checked = selectedIds.includes(Number(c.id));
+        const count = c.total_leads_count || c.total_leads || 0;
+        return `
+          <label style="display:flex;align-items:center;gap:10px;padding:9px 12px;background:${checked ? '#eefbf2' : '#ffffff'};border:1.5px solid ${checked ? '#00A651' : '#e2e8f0'};border-radius:8px;cursor:pointer;transition:all 0.15s ease;">
+            <input type="checkbox" value="${c.id}" ${checked ? 'checked' : ''} onchange="app.handleCampaignCheckboxToggle(${c.id}, this.checked)" style="width:17px;height:17px;accent-color:#00A651;cursor:pointer;">
+            <div style="flex:1;min-width:0;">
+              <div style="font-weight:700;font-size:12.5px;color:#143522;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${this.escapeHtml(c.name)}</div>
+              <div style="font-size:11px;color:#526e5f;">${count} contacts &bull; Caller ID: ${this.escapeHtml(c.caller_id_number || '+251911002233')}</div>
+            </div>
+          </label>
+        `;
+      }).join('');
+    }
+
+    // Update Badges & Status Pill
+    const pendingCount = (this.leads || []).filter(l => l.status === 'pending').length;
+    const agentQueueStatus = document.getElementById('agentQueueStatusText');
+    if (agentQueueStatus) {
+      agentQueueStatus.innerHTML = `Ready &middot; ${pendingCount} lead${pendingCount === 1 ? '' : 's'} in queue`;
+    }
+
+    if (badge) {
+      if (isMulti) {
+        badge.textContent = `${selectedIds.length} Campaigns Active`;
+        badge.className = 'sc-badge running';
+      } else {
+        const singleCamp = campaigns.find(c => Number(c.id) === selectedIds[0]);
+        badge.textContent = singleCamp ? singleCamp.name : (this.campaign?.name || 'Campaign Active');
+        badge.className = 'sc-badge running';
+      }
+    }
+
+    if (queueBadge) {
+      queueBadge.textContent = `${pendingCount} Leads in Queue`;
+      queueBadge.style.background = pendingCount > 0 ? '#00A651' : '#64748b';
+    }
+  }
+
+  handleDialerCampaignDropdownChange(val) {
+    if (val === 'multi') {
+      this.toggleMultiCampaignPanel(true);
+      return;
+    }
+    if (val === 'all') {
+      const allIds = (this.allCampaigns || []).map(c => Number(c.id));
+      if (allIds.length > 0) {
+        this.selectedCampaignIds = allIds;
+        this.loadCampaignData(allIds);
+        this.showToast(`Selected all ${allIds.length} campaigns for outbound dialing!`, 'success');
+      }
+      return;
+    }
+
+    const campId = Number(val);
+    if (!campId) return;
+    this.selectedCampaignIds = [campId];
+    this.activeCampaignId = campId;
+    this.loadCampaignData([campId]);
+    const camp = (this.allCampaigns || []).find(c => Number(c.id) === campId);
+    this.showToast(`Active dialing campaign set to: ${camp?.name || 'Campaign #' + campId}`, 'success');
+  }
+
+  toggleMultiCampaignPanel(forceOpen = null) {
+    const wrap = document.getElementById('multiCampaignSelectorWrap');
+    if (!wrap) return;
+    const isCurrentlyOpen = wrap.style.display !== 'none';
+    const shouldOpen = (forceOpen !== null) ? forceOpen : !isCurrentlyOpen;
+    wrap.style.display = shouldOpen ? 'block' : 'none';
+
+    const btn = document.getElementById('btnToggleMultiCampaign');
+    if (btn) {
+      btn.className = shouldOpen ? 'sc-pill-btn active' : 'sc-pill-btn secondary';
+    }
+  }
+
+  handleCampaignCheckboxToggle(campaignId, isChecked) {
+    const id = Number(campaignId);
+    if (isChecked) {
+      if (!this.selectedCampaignIds.includes(id)) {
+        this.selectedCampaignIds.push(id);
+      }
+    } else {
+      if (this.selectedCampaignIds.length > 1) {
+        this.selectedCampaignIds = this.selectedCampaignIds.filter(x => x !== id);
+      } else {
+        this.showToast('At least one campaign must remain selected.', 'error');
+        this.renderDialerCampaignSelector();
+        return;
+      }
+    }
+    this.renderDialerCampaignSelector();
+  }
+
+  selectAllCampaignsForDialer(select) {
+    if (select) {
+      this.selectedCampaignIds = (this.allCampaigns || []).map(c => Number(c.id));
+    } else {
+      this.selectedCampaignIds = [Number(this.allCampaigns?.[0]?.id || 1)];
+    }
+    this.renderDialerCampaignSelector();
+  }
+
+  applyMultiCampaignSelection() {
+    if (!this.selectedCampaignIds || this.selectedCampaignIds.length === 0) {
+      this.selectedCampaignIds = [1];
+    }
+    this.loadCampaignData(this.selectedCampaignIds);
+    this.showToast(`Loaded ${this.selectedCampaignIds.length} campaigns into outbound dialing queue!`, 'success');
+  }
+
+  async loadCampaignsOverview() {
+    try {
+      const res = await fetch('api.php?action=get_all_campaigns');
+      const data = await res.json();
+      if (!data.success) return;
+      this.allCampaigns = data.campaigns || [];
+      const tbody = document.getElementById('campaignsOverviewTableBody');
+      if (!tbody) return;
+
+      if (this.allCampaigns.length === 0) {
+        tbody.innerHTML = `<tr class="camp-table-row"><td colspan="5" style="padding:24px;text-align:center;color:#64748b;">No campaigns found. Create one using the form on the right.</td></tr>`;
+        return;
+      }
+
+      tbody.innerHTML = this.allCampaigns.map(c => {
+        const total = parseInt(c.total_leads > 0 ? c.total_leads : (c.total_leads_count || 0), 10);
+        const comp = parseInt(c.completed_leads > 0 ? c.completed_leads : (c.completed_leads_count || 0), 10);
+        const pct = total > 0 ? Math.min(100, Math.round((comp / total) * 100)) : 0;
+        
+        const isRunning = (c.status === 'running' || c.status === 'active');
+        const statusClass = isRunning ? 'running' : 'idle';
+        const statusLabel = isRunning ? 'Running' : (c.status === 'completed' ? 'Completed' : 'Idle');
+        const dotClass = isRunning ? 'green' : 'blue';
+
+        let progressText = `${pct}%`;
+        if (total > 0 && comp < total) {
+          progressText = `${pct}% · ${comp} of ${total}`;
+        } else if (total === 0) {
+          progressText = `0% · 0 of 0`;
+        }
+
+        let typeDisplay = 'Predictive';
+        if (c.type === 'agentless') typeDisplay = 'Agentless';
+        else if (c.type === 'progressive') typeDisplay = 'Progressive';
+        else if (c.type === 'preview') typeDisplay = 'Preview';
+        else if (c.type) typeDisplay = c.type.charAt(0).toUpperCase() + c.type.slice(1);
+
+        const callerId = c.caller_id_number || '+251911002233';
+
+        return `
+          <tr class="camp-table-row">
+            <td style="padding:14px 12px;vertical-align:middle;">
+              <div style="font-weight:700;color:#0f172a;font-size:13.5px;line-height:1.3;">${this.escapeHtml(c.name)}</div>
+              <div style="font-size:11.5px;color:#64748b;margin-top:2px;">Caller ID ${this.escapeHtml(callerId)}</div>
+            </td>
+            <td style="padding:14px 12px;vertical-align:middle;color:#334155;font-size:13px;font-weight:500;">
+              ${typeDisplay}
+            </td>
+            <td style="padding:14px 12px;vertical-align:middle;">
+              <span class="camp-status-badge ${statusClass}">
+                <span class="camp-dot ${dotClass}"></span>
+                ${statusLabel}
+              </span>
+            </td>
+            <td style="padding:14px 12px;vertical-align:middle;min-width:130px;">
+              <div style="font-size:11px;color:#64748b;font-weight:600;margin-bottom:5px;">
+                ${progressText}
+              </div>
+              <div class="camp-progress-track">
+                <div class="camp-progress-fill" style="width:${pct}%;"></div>
+              </div>
+            </td>
+            <td style="padding:14px 12px;vertical-align:middle;text-align:right;white-space:nowrap;">
+              <button type="button" class="camp-btn-design" onclick="selectCampaignForDesigner(${c.id})" title="Configure Audio, TTS &amp; IVR Message">Design</button>
+              <button type="button" class="camp-btn-more" onclick="app.openCampaignActionMenu(${c.id}, event)" title="More options">More</button>
+            </td>
+          </tr>
+        `;
+      }).join('');
+      this.populateCampaignSelectDropdowns();
+      this.renderDialerCampaignSelector();
+    } catch (e) {
+      console.warn('loadCampaignsOverview error:', e);
+    }
+  }
+
+  setWizardStep(step) {
+    for (let i = 1; i <= 4; i++) {
+      const stepItem = document.getElementById(`wizardStep${i}`);
+      if (stepItem) {
+        const circle = stepItem.querySelector('.camp-step-circle');
+        const title = stepItem.querySelector('.camp-step-title');
+        if (i === step) {
+          stepItem.classList.add('active');
+          if (circle) circle.classList.add('active');
+          if (title) title.classList.add('active');
+        } else {
+          stepItem.classList.remove('active');
+          if (circle) circle.classList.remove('active');
+          if (title) title.classList.remove('active');
+        }
+      }
+    }
+    if (step === 2) {
+      switchCampaignSubView('designer');
+    } else if (step === 1) {
+      switchCampaignSubView('list');
+    }
+  }
+
+  async handleNewCampaignWizardSubmit(e) {
+    if (e) e.preventDefault();
+    const name = document.getElementById('newCampaignNameInput')?.value.trim();
+    const type = document.getElementById('newCampaignTypeSelect')?.value || 'bill_reminder';
+    const mode = document.getElementById('newCampaignModeSelect')?.value || 'agentless';
+    const callerId = document.getElementById('newCampaignCallerIdSelect')?.value || '+251911002233';
+
+    if (!name) {
+      this.showToast('Please enter a campaign name', 'warning');
+      return;
+    }
+
+    const formData = new FormData();
+    formData.append('name', name);
+    formData.append('type', mode);
+    formData.append('caller_id_name', 'Ethio Telecom');
+    formData.append('caller_id_number', callerId);
+    formData.append('ivr_language', 'amharic');
+
+    try {
+      const res = await fetch('api.php?action=create_campaign', { method: 'POST', body: formData });
+      const data = await res.json();
+      if (data && data.success) {
+        this.showToast(`Campaign "${name}" created! Advancing to Message Design...`, 'success');
+        await this.loadCampaignsOverview();
+        const newCampId = data.campaign_id;
+        if (newCampId) {
+          this.selectCampaignForDesigner(newCampId);
+        } else {
+          switchCampaignSubView('designer');
+        }
+        this.setWizardStep(2);
+      } else {
+        this.showToast(data.error || 'Failed to create campaign', 'error');
+      }
+    } catch (err) {
+      this.showToast('Network error creating campaign', 'error');
+    }
+  }
+
+  openCampaignActionMenu(campaignId, event) {
+    if (event) event.stopPropagation();
+    const camp = (this.allCampaigns || []).find(c => Number(c.id) === Number(campaignId));
+    if (!camp) return;
+
+    const idInp = document.getElementById('campActionMenuCampaignId');
+    const titleEl = document.getElementById('campActionMenuTitle');
+    if (idInp) idInp.value = camp.id;
+    if (titleEl) titleEl.textContent = `${camp.name} Options`;
+
+    this.openModal('modalCampaignActionMenu');
+  }
+
+  actionMenuDialCampaign() {
+    const id = document.getElementById('campActionMenuCampaignId')?.value;
+    this.closeModal('modalCampaignActionMenu');
+    if (id) {
+      this.openCampaignInQueue(Number(id));
+    }
+  }
+
+  actionMenuAddContacts() {
+    const id = document.getElementById('campActionMenuCampaignId')?.value;
+    this.closeModal('modalCampaignActionMenu');
+    if (id) {
+      this.openAddContactsModal(Number(id));
+    }
+  }
+
+  actionMenuExportContacts() {
+    const id = document.getElementById('campActionMenuCampaignId')?.value;
+    this.closeModal('modalCampaignActionMenu');
+    if (id) {
+      this.exportCampaignContacts(Number(id));
+    }
+  }
+
+  async actionMenuToggleStatus() {
+    const id = document.getElementById('campActionMenuCampaignId')?.value;
+    this.closeModal('modalCampaignActionMenu');
+    if (!id) return;
+    const camp = (this.allCampaigns || []).find(c => Number(c.id) === Number(id));
+    const nextStatus = (camp && camp.status === 'running') ? 'idle' : 'running';
+
+    try {
+      const formData = new FormData();
+      formData.append('campaign_id', id);
+      formData.append('status', nextStatus);
+      const res = await fetch('api.php?action=toggle_campaign_status', { method: 'POST', body: formData });
+      const data = await res.json();
+      this.showToast(`Campaign status updated to ${nextStatus}`, 'success');
+      await this.loadCampaignsOverview();
+    } catch (e) {
+      this.showToast('Failed to update campaign status', 'error');
+    }
+  }
+
+  async actionMenuDeleteCampaign() {
+    const id = document.getElementById('campActionMenuCampaignId')?.value;
+    this.closeModal('modalCampaignActionMenu');
+    if (!id) return;
+    if (!confirm('Are you sure you want to delete this campaign and all its leads?')) return;
+
+    try {
+      const formData = new FormData();
+      formData.append('campaign_id', id);
+      const res = await fetch('api.php?action=delete_campaign', { method: 'POST', body: formData });
+      const data = await res.json();
+      if (data && data.success) {
+        this.showToast('Campaign deleted successfully', 'success');
+        await this.loadCampaignsOverview();
+      } else {
+        this.showToast(data.error || 'Failed to delete campaign', 'error');
+      }
+    } catch (e) {
+      this.showToast('Error deleting campaign', 'error');
+    }
+  }
+
+  populateCampaignSelectDropdowns(selectedId = null) {
+    const campaigns = this.allCampaigns || [];
+    if (campaigns.length === 0) return;
+
+    const targetIds = ['uploadCampaignSelect', 'manualCampaignSelect', 'singleAddCampaignSelect'];
+    targetIds.forEach(id => {
+      const sel = document.getElementById(id);
+      if (!sel) return;
+      const currentVal = selectedId || sel.value || this.activeCampaignId || this.campaign?.id;
+      sel.innerHTML = campaigns.map(c => {
+        const count = c.total_leads_count || c.total_leads || 0;
+        return `<option value="${c.id}">${this.escapeHtml(c.name)} (${count} contacts)</option>`;
+      }).join('');
+      if (currentVal) sel.value = String(currentVal);
+    });
+  }
+
+  async openAddContactsModal(campaignId = null) {
+    if (!this.allCampaigns || this.allCampaigns.length === 0) {
+      await this.loadCampaignsOverview();
+    }
+    const targetId = campaignId || this.activeCampaignId || this.campaign?.id || 1;
+    this.populateCampaignSelectDropdowns(targetId);
+    this.openModal('modalUpload');
+  }
+
+  async openManualAddModal(campaignId = null) {
+    if (!this.allCampaigns || this.allCampaigns.length === 0) {
+      await this.loadCampaignsOverview();
+    }
+    const targetId = campaignId || this.activeCampaignId || this.campaign?.id || 1;
+    this.populateCampaignSelectDropdowns(targetId);
+    this.openModal('modalManual');
+  }
+
+  async openSingleAddModal(campaignId = null) {
+    if (!this.allCampaigns || this.allCampaigns.length === 0) {
+      await this.loadCampaignsOverview();
+    }
+    const targetId = campaignId || this.activeCampaignId || this.campaign?.id || 1;
+    this.populateCampaignSelectDropdowns(targetId);
+    this.openModal('modalSingleAdd');
+  }
+
+  exportCampaignContacts(campaignId = null) {
+    const targetId = campaignId || this.activeCampaignId || this.campaign?.id || 1;
+    this.showToast('Generating contacts CSV export...', 'info');
+    window.location.href = `api.php?action=export_contacts_csv&campaign_id=${encodeURIComponent(targetId)}`;
+  }
+
+  async selectCampaignForDesigner(campaignId) {
+    this.activeCampaignId = Number(campaignId);
+
+    // Switch view immediately to provide instant visual navigation
+    if (typeof window.switchCampaignSubView === 'function') {
+      window.switchCampaignSubView('designer');
+    } else {
+      const listEl = document.getElementById('subViewCampaignsList');
+      const designerEl = document.getElementById('subViewCampaignsDesigner');
+      if (listEl) listEl.style.display = 'none';
+      if (designerEl) designerEl.style.display = 'block';
+    }
+
+    // Immediately reflect campaign name in breadcrumb tab from cached list
+    const camps = this.allCampaigns || [];
+    const c = camps.find(item => Number(item.id) === Number(campaignId));
+    if (c) {
+      this.campaign = c;
+      const tabName = document.getElementById('designerTabCampaignName');
+      if (tabName) tabName.textContent = c.name || 'Campaign';
+      this.updateDesignerUI();
+    }
+
+    try {
+      await this.loadCampaignData(campaignId);
+      this.updateDesignerUI();
+    } catch (err) {
+      console.warn('loadCampaignData in selectCampaignForDesigner error:', err);
+    }
+  }
+
+  loadData(campaignInput = null) {
+    return this.loadCampaignData(campaignInput);
+  }
+
+  openCampaignInQueue(campaignId) {
+    this.selectedCampaignIds = [Number(campaignId)];
+    this.activeCampaignId = Number(campaignId);
+    this.loadCampaignData([campaignId]).then(() => {
+      if (typeof window.switchNav === 'function') {
+        window.switchNav('tabDialer', 'dialer/agent');
+      }
+    });
+  }
+
+  updateDesignerUI() {
+    if (!this.campaign) return;
+    const nameEl = document.getElementById('designerCampaignNameText');
+    if (nameEl) nameEl.textContent = this.campaign.name || 'Outbound Campaign';
+
+    const tabNameEl = document.getElementById('designerTabCampaignName');
+    if (tabNameEl) tabNameEl.textContent = this.campaign.name || 'Bill reminder: October';
+
+    const subPill = document.getElementById('subBtnCampaignsDesigner');
+    if (subPill) subPill.textContent = `${this.campaign.name || 'Campaign'} Designer`;
+
+    const typeBadge = document.getElementById('designerCampaignTypeBadge');
+    if (typeBadge) {
+      typeBadge.textContent = (this.campaign.type || 'predictive').toUpperCase();
+    }
+
+    const txtArea = document.getElementById('campaignMessageText');
+    if (txtArea && this.campaign.ivr_message_text) {
+      txtArea.value = this.campaign.ivr_message_text;
+    }
+
+    const lang = (this.campaign.ivr_language || 'amharic').toLowerCase();
+    document.querySelectorAll('#langBtnAmharic, #langBtnOromifa, #langBtnEnglish').forEach(b => {
+      b.className = 'des-lang-btn';
+    });
+    if (lang === 'amharic') document.getElementById('langBtnAmharic')?.classList.add('active');
+    else if (lang === 'oromifa') document.getElementById('langBtnOromifa')?.classList.add('active');
+    else document.getElementById('langBtnEnglish')?.classList.add('active');
+
+    // Audio prompt dropdown
+    this.populateDesignerAudioDropdown();
+
+    // Live Results calculation
+    const total = (this.campaign.total_leads > 0) ? this.campaign.total_leads : this.leads.length;
+    let pending = 0, answered = 0, busy = 0, noAnswer = 0;
+    this.leads.forEach(l => {
+      const s = l.status;
+      if (s === 'pending') pending++;
+      else if (['answered', 'completed', 'ivr_completed', 'ivr_playing'].includes(s)) answered++;
+      else if (s === 'busy') busy++;
+      else if (s === 'no_answer') noAnswer++;
+    });
+
+    const dialed = total > 0 ? (total - pending) : 0;
+    const pct = total > 0 ? Math.min(100, Math.round((dialed / total) * 100)) : 0;
+
+    const elSched = document.getElementById('chipScheduled');
+    const elDialed = document.getElementById('chipDialed');
+    const elAns = document.getElementById('chipAnswered');
+    const elBusy = document.getElementById('chipBusy');
+    const elNoAns = document.getElementById('chipNoAnswer');
+
+    if (elSched) elSched.textContent = (total > 0 ? total : 1);
+    if (elDialed) elDialed.textContent = dialed;
+    if (elAns) elAns.textContent = answered;
+    if (elBusy) elBusy.textContent = busy;
+    if (elNoAns) elNoAns.textContent = noAnswer;
+
+    const pctEl = document.getElementById('designerProgressPercent');
+    const ratioEl = document.getElementById('designerProgressRatio');
+    const barEl = document.getElementById('designerProgressBarFill');
+
+    if (pctEl) pctEl.textContent = `Progress ${pct}%`;
+    if (ratioEl) ratioEl.textContent = `${dialed} of ${total > 0 ? total : 1} dialed`;
+    if (barEl) barEl.style.width = `${pct}%`;
+
+    const statusBadge = document.getElementById('designerCampaignStatusBadge');
+    const btnLaunch = document.getElementById('btnLaunchDesignerCampaign');
+
+    const isRunning = (this.campaign.status === 'running');
+    if (statusBadge) {
+      statusBadge.innerHTML = `<span class="dot"></span>${isRunning ? 'Running' : (this.campaign.status === 'completed' ? 'Done' : 'Paused')}`;
+      statusBadge.className = `des-status-pill ${isRunning ? 'running' : 'idle'}`;
+    }
+    if (btnLaunch) {
+      btnLaunch.textContent = isRunning ? 'Pause campaign' : 'Launch campaign';
+      btnLaunch.className = 'des-btn-outline';
+    }
+  }
+
+  populateDesignerAudioDropdown() {
+    const sel = document.getElementById('designerAudioPromptSelect');
+    if (!sel || !this.audioRecordings) return;
+    sel.innerHTML = this.audioRecordings.map(a => {
+      const isSel = (this.campaign?.ivr_audio_file === a.filepath || this.campaign?.ivr_audio_name === a.name);
+      const langLabel = (a.language || 'Amharic').charAt(0).toUpperCase() + (a.language || 'Amharic').slice(1);
+      return `<option value="${this.escapeHtml(a.filepath)}" data-name="${this.escapeHtml(a.name)}" ${isSel ? 'selected' : ''}>${this.escapeHtml(a.name)} &middot; ${langLabel}</option>`;
+    }).join('');
+  }
+
+  handleDesignerAudioChange(audioPath) {
+    const sel = document.getElementById('designerAudioPromptSelect');
+    const opt = sel?.options[sel.selectedIndex];
+    const name = opt?.dataset.name || '';
+    if (this.campaign) {
+      this.campaign.ivr_audio_file = audioPath;
+      this.campaign.ivr_audio_name = name;
+    }
+    const player = document.getElementById('mainAudioPlayer');
+    if (player) player.src = audioPath;
+  }
+
+  async saveCampaignDesigner() {
+    if (!this.campaign) return;
+    const txtArea = document.getElementById('campaignMessageText');
+    const selAudio = document.getElementById('designerAudioPromptSelect');
+    const activeLangBtn = document.querySelector('#langBtnAmharic.active, #langBtnOromifa.active, #langBtnEnglish.active');
+    const lang = activeLangBtn ? (activeLangBtn.id.replace('langBtn', '').toLowerCase()) : 'amharic';
+
+    const formData = new FormData();
+    formData.append('campaign_id', this.campaign.id);
+    formData.append('message_text', txtArea ? txtArea.value : '');
+    formData.append('language', lang);
+    if (selAudio) {
+      formData.append('audio_file', selAudio.value);
+      const opt = selAudio.options[selAudio.selectedIndex];
+      if (opt) formData.append('audio_name', opt.dataset.name || '');
+    }
+
+    try {
+      const res = await fetch('api.php?action=save_campaign_designer', {
+        method: 'POST',
+        body: formData
+      });
+      const data = await res.json();
+      if (data.success) {
+        this.showToast('Campaign IVR template and voice settings saved to PostgreSQL!', 'success');
+        this.loadCampaignsOverview();
+      } else {
+        this.showToast(data.error || 'Failed to save settings', 'error');
+      }
+    } catch (e) {
+      this.showToast('Network error saving campaign settings', 'error');
+    }
+  }
+
+  async handleCreateCampaign(e) {
+    e.preventDefault();
+    const name = document.getElementById('newCampaignNameInput')?.value.trim();
+    const type = document.getElementById('newCampaignTypeSelect')?.value;
+    const mode = document.getElementById('newCampaignModeSelect')?.value;
+    const callerId = document.getElementById('newCampaignCallerIdSelect')?.value;
+
+    if (!name) {
+      this.showToast('Please enter a campaign name', 'warning');
+      return;
+    }
+
+    const formData = new FormData();
+    formData.append('name', name);
+    formData.append('type', mode || type || 'agentless');
+    formData.append('caller_id_number', callerId || '+251911002233');
+    formData.append('language', 'amharic');
+
+    try {
+      const res = await fetch('api.php?action=create_campaign', {
+        method: 'POST',
+        body: formData
+      });
+      const data = await res.json();
+      if (data.success) {
+        this.showToast(`Campaign "${name}" created in PostgreSQL!`, 'success');
+        await this.loadCampaignsOverview();
+        await this.selectCampaignForDesigner(data.campaign_id);
+      } else {
+        this.showToast(data.error || 'Failed to create campaign', 'error');
+      }
+    } catch (err) {
+      this.showToast('Error creating campaign', 'error');
+    }
+  }
+
+  async toggleCampaignLaunch() {
+    if (!this.campaign) return;
+    const newStatus = (this.campaign.status === 'running') ? 'paused' : 'running';
+
+    const formData = new FormData();
+    formData.append('campaign_id', this.campaign.id);
+    formData.append('status', newStatus);
+
+    try {
+      const res = await fetch('api.php?action=set_campaign_status', {
+        method: 'POST',
+        body: formData
+      });
+      const data = await res.json();
+      if (data.success) {
+        this.campaign.status = newStatus;
+        this.isRunning = (newStatus === 'running');
+        this.isPaused = (newStatus === 'paused');
+        this.updateDesignerUI();
+        this.loadCampaignsOverview();
+      }
+    } catch (e) {
+      this.showToast('Error updating campaign status', 'error');
+    }
+  }
+
+  renderAgentScreen() {
+    const pendingLeads = (this.leads || []).filter(l => l.status === 'pending');
+    this.activeLead = pendingLeads.length > 0 ? pendingLeads[0] : (this.leads ? this.leads[0] : null);
+
+    const nameEl = document.getElementById('agentScreenCustName');
+    const phoneEl = document.getElementById('agentScreenPhoneText');
+    const debtEl = document.getElementById('agentScreenDebtText');
+    const debtAmtEl = document.getElementById('agentScreenDebtAmount');
+    const debtDueEl = document.getElementById('agentScreenDebtDue');
+    const acctEl = document.getElementById('agentScreenAccountText');
+    const timeEl = document.getElementById('agentScreenCallTimeText');
+    const campEl = document.getElementById('agentScreenCampaignText');
+    const langTag = document.getElementById('agentScreenLangTag');
+    const tierTag = document.getElementById('agentScreenTierTag');
+    const scriptBox = document.getElementById('agentDynamicScriptBox');
+    const qCountTag = document.getElementById('agentQueueStatusTag');
+    const queueStatusText = document.getElementById('agentQueueStatusText');
+
+    if (queueStatusText) {
+      queueStatusText.innerHTML = `Ready &middot; ${pendingLeads.length} lead${pendingLeads.length === 1 ? '' : 's'} in queue`;
+    }
+
+    if (qCountTag) {
+      qCountTag.textContent = `${pendingLeads.length} Leads in Queue`;
+      qCountTag.style.background = pendingLeads.length > 0 ? '#00A651' : '#64748b';
+    }
+
+    if (!this.activeLead) {
+      if (nameEl) nameEl.textContent = 'Queue Empty';
+      if (phoneEl) phoneEl.textContent = '-';
+      if (debtEl) debtEl.textContent = 'All calls completed';
+      if (debtAmtEl) debtAmtEl.textContent = 'ETB 0.00';
+      if (debtDueEl) debtDueEl.textContent = 'No pending calls';
+      if (acctEl) acctEl.textContent = '-';
+      if (timeEl) timeEl.textContent = '-';
+      if (scriptBox) scriptBox.textContent = 'All scheduled leads for this campaign have been dialed. Upload new contacts or reset leads to continue.';
+      return;
+    }
+
+    const lead = this.activeLead;
+    if (nameEl) nameEl.textContent = lead.customer_name || 'Helen Tesfaye';
+    if (phoneEl) phoneEl.textContent = lead.phone_number || '+251911456789';
+
+    const debtAmt = parseFloat(lead.debt_amount || 450);
+    const curr = lead.currency || 'ETB';
+    const debtStr = `${curr} ${debtAmt.toFixed(2)}`;
+    const dueTimeStr = lead.call_time || '2026-10-20 11:15';
+
+    if (debtEl) debtEl.textContent = `${debtStr}, due ${dueTimeStr}`;
+    if (debtAmtEl) debtAmtEl.textContent = debtStr;
+    if (debtDueEl) debtDueEl.textContent = `Due ${dueTimeStr}`;
+
+    if (acctEl) acctEl.textContent = lead.account_number || `ACC-${lead.id}98231`.slice(0, 9);
+    if (timeEl) timeEl.textContent = dueTimeStr;
+    if (campEl) campEl.textContent = lead.campaign_name || this.campaign?.name || 'Bill reminder: October';
+
+    const leadLang = (lead.language || this.campaign?.ivr_language || 'amharic').toLowerCase();
+    if (langTag) {
+      langTag.textContent = leadLang.charAt(0).toUpperCase() + leadLang.slice(1);
+    }
+    if (tierTag) {
+      tierTag.textContent = debtAmt > 1000 ? 'VIP / Corporate' : (debtAmt > 500 ? 'Gold' : 'Standard');
+    }
+
+    // Dynamic Script customized with real customer name & debt amount (Exact Amharic styling)
+    if (scriptBox) {
+      const cName = lead.customer_name || 'Helen Tesfaye';
+      if (leadLang === 'amharic') {
+        scriptBox.innerHTML = `&ldquo;ሰላም ${this.escapeHtml(cName)}: ከኢትዮ ቴሌኮም የደንበኞች አገልግሎት ነው የምደውለው:: የ ${this.escapeHtml(debtStr)} የክፍያ ሂሳብዎን ለማስታወስ ነበር:: በቴሌብር ለመክፈል አሁን የክፍያ መልእክት ልላክሎት?&rdquo;`;
+      } else if (leadLang === 'oromifa') {
+        scriptBox.innerHTML = `&ldquo;Akkam jirtu ${this.escapeHtml(cName)}: tajaajila maamiltootaa Itiyoo Telekoom irraani bilbila:: Kaffaltiin herrega keessanii ${this.escapeHtml(debtStr)} dhumachuu isaa isin yaadachiisuufi:: Telebirriin akka kaffaltaniif ergaa isiniif erguu?&rdquo;`;
+      } else {
+        scriptBox.innerHTML = `&ldquo;Hello ${this.escapeHtml(cName)}: this is Ethio Telecom customer service. I am calling regarding your outstanding balance of ${this.escapeHtml(debtStr)}. Would you like me to send an instant Telebirr USSD payment prompt to your phone?&rdquo;`;
+      }
+    }
+  }
+
+  selectAgentOutcome(labelEl, dispo) {
+    document.querySelectorAll('#dialOutcomeList .dial-outcome-opt').forEach(opt => {
+      opt.classList.remove('active');
+      const r = opt.querySelector('.dial-radio-circle');
+      if (r) r.classList.remove('checked');
+      const t = opt.querySelector('.dial-outcome-text');
+      if (t) t.classList.remove('active');
+    });
+    if (labelEl) {
+      labelEl.classList.add('active');
+      const r = labelEl.querySelector('.dial-radio-circle');
+      if (r) r.classList.add('checked');
+      const t = labelEl.querySelector('.dial-outcome-text');
+      if (t) t.classList.add('active');
+    }
+    this.selectedDispo = dispo;
+    this.showToast(`Outcome selected: ${dispo.replace(/_/g, ' ').toUpperCase()}`, 'info');
+  }
+
+  toggleAgentCheck(item) {
+    if (!item) return;
+    const box = item.querySelector('.dial-check-box');
+    if (!box) return;
+    const isChecked = box.classList.contains('checked');
+    if (isChecked) {
+      box.classList.remove('checked');
+      box.innerHTML = '';
+    } else {
+      box.classList.add('checked');
+      box.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+    }
+  }
+
+  selectAgentDispo(btn, dispo) {
+    this.selectAgentOutcome(btn, dispo);
+  }
+
+  handleAgentDialClick() {
+    if (!this.activeLead || !this.activeLead.phone_number) {
+      this.showToast('No customer selected to dial', 'warning');
+      return;
+    }
+    this.showToast(`Originating call to ${this.activeLead.customer_name} (${this.activeLead.phone_number})...`, 'info');
+    this.clickToDial(this.activeLead.phone_number, this.activeLead.customer_name);
+  }
+
+  async handleAgentSkipClick() {
+    if (!this.activeLead) {
+      this.showToast('No more leads to skip', 'warning');
+      return;
+    }
+    this.showToast(`Skipped ${this.activeLead.customer_name}. Fetching next lead...`, 'warning');
+    const currentIdx = this.leads.findIndex(l => l.id === this.activeLead.id);
+    const remainingPending = this.leads.slice(currentIdx + 1).filter(l => l.status === 'pending');
+    if (remainingPending.length > 0) {
+      this.activeLead = remainingPending[0];
+    } else {
+      const anyPending = this.leads.filter(l => l.status === 'pending' && l.id !== this.activeLead.id);
+      this.activeLead = anyPending.length > 0 ? anyPending[0] : null;
+    }
+    this.renderAgentScreen();
+  }
+
+  async handleAgentSaveNextClick() {
+    if (!this.activeLead) {
+      this.showToast('No active contact to save', 'warning');
+      return;
+    }
+
+    const dispo = this.selectedDispo || 'promise_to_pay';
+    const notes = document.getElementById('agentCallNotesInput')?.value || '';
+    const promiseDate = document.getElementById('agentPromiseDateSelect')?.value || '';
+    const duration = parseInt(this.lastCallDuration || 35, 10);
+
+    const formData = new FormData();
+    formData.append('lead_id', this.activeLead.id);
+    formData.append('campaign_id', this.campaign?.id || 1);
+    formData.append('disposition', dispo);
+    formData.append('promise_date', promiseDate);
+    formData.append('notes', notes);
+    formData.append('duration_sec', duration);
+
+    try {
+      const res = await fetch('api.php?action=save_agent_outcome', {
+        method: 'POST',
+        body: formData
+      });
+      const data = await res.json();
+      if (data.success) {
+        this.showToast(`Outcome recorded to PostgreSQL! Connecting next call...`, 'success');
+
+        const notesInput = document.getElementById('agentCallNotesInput');
+        if (notesInput) notesInput.value = '';
+
+        const tag = document.getElementById('agentNextCallCountdownTag');
+        if (tag) {
+          let count = 5;
+          tag.textContent = `Next call in ${count}s`;
+          const timer = setInterval(() => {
+            count--;
+            if (count > 0) {
+              tag.textContent = `Next call in ${count}s`;
+            } else {
+              clearInterval(timer);
+              tag.textContent = 'Ready';
+            }
+          }, 1000);
+        }
+
+        if (data.next_lead) {
+          this.activeLead = data.next_lead;
+        } else {
+          const remaining = this.leads.filter(l => l.status === 'pending' && l.id !== this.activeLead.id);
+          this.activeLead = remaining.length > 0 ? remaining[0] : null;
+        }
+
+        await this.loadCampaignData();
+      } else {
+        this.showToast(data.error || 'Failed to save outcome', 'error');
+      }
+    } catch (e) {
+      this.showToast('Network error saving outcome', 'error');
+    }
+  }
+
+  async setPacingMode(mode) {
+    const btnPrev = document.getElementById('btnPacingPreview');
+    const btnProg = document.getElementById('btnPacingProgressive');
+    const btnPred = document.getElementById('btnPacingPredictive');
+
+    if (btnPrev) btnPrev.className = (mode === 'preview') ? 'dial-seg-btn active-green' : 'dial-seg-btn';
+    if (btnProg) btnProg.className = (mode === 'progressive') ? 'dial-seg-btn active-green' : 'dial-seg-btn';
+    if (btnPred) btnPred.className = (mode === 'predictive') ? 'dial-seg-btn active-green' : 'dial-seg-btn';
+
+    const pacingSelect = document.getElementById('pacingModeSelect');
+    if (pacingSelect) pacingSelect.value = mode;
+
+    const formData = new FormData();
+    formData.append('campaign_id', this.campaign?.id || 1);
+    formData.append('pacing_mode', mode);
+
+    try {
+      const res = await fetch('api.php?action=set_pacing_mode', {
+        method: 'POST',
+        body: formData
+      });
+      const data = await res.json();
+      if (data.success) {
+        if (this.campaign) this.campaign.type = mode;
+        const modeLabels = {
+          'preview': 'Preview (Agent manual click before dialing)',
+          'progressive': 'Progressive (1-to-1 immediate lead connection)',
+          'predictive': 'Predictive (High-throughput algorithm, target 1,000 calls/min)'
+        };
+        this.showToast(`Pacing mode: ${modeLabels[mode] || mode}`, 'success');
+      }
+    } catch (e) {
+      this.showToast('Failed to update pacing mode', 'error');
+    }
+  }
+
+  async startMockVolumeTest() {
+    const modeSel = document.getElementById('mockVolumeModeSelect');
+    const mode = modeSel ? modeSel.value : 'paced_1000';
+    const btn = document.getElementById('btnRunMockVolumeTest');
+    const btnStop = document.getElementById('btnStopMockVolumeTest');
+    const resBox = document.getElementById('mockVolumeResultsBox');
+
+    let totalTarget = 1000;
+    let isPaced = true;
+    if (mode === 'paced_500') totalTarget = 500;
+    else if (mode === 'paced_170') totalTarget = 170;
+    else if (mode === 'fast_1000') { totalTarget = 1000; isPaced = false; }
+
+    this.isMockTestRunning = true;
+    if (btn) btn.style.display = 'none';
+    if (btnStop) btnStop.style.display = 'inline-block';
+
+    if (resBox) {
+      resBox.style.display = 'block';
+      resBox.innerHTML = `
+        <div style="background:#f0fdf4;border:1.5px solid #86efac;border-radius:12px;padding:18px;margin-top:14px;box-shadow:0 2px 6px rgba(0,0,0,0.03);">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px;">
+            <div style="font-weight:700;color:#166534;font-size:14.5px;display:flex;align-items:center;gap:8px;">
+              <span class="spinner-border spinner-border-sm" style="display:inline-block;width:14px;height:14px;border:2.5px solid #00A651;border-right-color:transparent;border-radius:50%;animation:spin 0.6s linear infinite;"></span>
+              <span id="mockTestHeaderTitle">Live Mock Carrier Trunk Test &bull; Pacing 17 Calls/Sec</span>
+            </div>
+            <div style="font-family:monospace;font-size:13px;font-weight:700;color:#15803d;background:#dcfce7;padding:4px 12px;border-radius:12px;" id="mockTestTimer">00:00</div>
+          </div>
+
+          <!-- Live Animated Progress Bar -->
+          <div style="background:#e2e8f0;border-radius:9999px;height:10px;overflow:hidden;margin-bottom:14px;">
+            <div id="mockTestProgressBar" style="width:0%;height:100%;background:linear-gradient(90deg, #00A651, #16a34a);transition:width 0.3s ease;"></div>
+          </div>
+
+          <!-- 4 Metrics Chips -->
+          <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(130px, 1fr));gap:10px;font-size:12px;margin-bottom:12px;">
+            <div style="background:#ffffff;padding:9px 12px;border-radius:8px;border:1px solid #bbf7d0;">
+              <div style="color:#64748b;font-size:11px;">Calls Dispatched</div>
+              <div style="font-size:16px;font-weight:800;color:#0f172a;" id="mockTestCount">0 / ${totalTarget}</div>
+            </div>
+            <div style="background:#ffffff;padding:9px 12px;border-radius:8px;border:1px solid #bbf7d0;">
+              <div style="color:#64748b;font-size:11px;">Live Throughput</div>
+              <div style="font-size:16px;font-weight:800;color:#00A651;" id="mockTestCpm">0 CPM</div>
+            </div>
+            <div style="background:#ffffff;padding:9px 12px;border-radius:8px;border:1px solid #bbf7d0;">
+              <div style="color:#64748b;font-size:11px;">Active Trunk Channels</div>
+              <div style="font-size:16px;font-weight:800;color:#0284c7;" id="mockTestChannels">0</div>
+            </div>
+            <div style="background:#ffffff;padding:9px 12px;border-radius:8px;border:1px solid #bbf7d0;">
+              <div style="color:#64748b;font-size:11px;">Answered / IVR</div>
+              <div style="font-size:16px;font-weight:800;color:#15803d;" id="mockTestAnswered">0</div>
+            </div>
+            <div style="background:#ffffff;padding:9px 12px;border-radius:8px;border:1px solid #bbf7d0;">
+              <div style="color:#64748b;font-size:11px;">Busy / No Answer</div>
+              <div style="font-size:16px;font-weight:800;color:#b45309;" id="mockTestBusy">0</div>
+            </div>
+          </div>
+
+          <div style="font-size:11.5px;color:#166534;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+            <span>🔒 100% Mock Telephony: Zero real phone calls placed. Target numbers: +251900000001 - +251900001000.</span>
+            <button type="button" class="btn btn-xs btn-outline-success" onclick="switchNav('tabReports', 'reports')" style="font-size:11.5px;padding:3px 10px;cursor:pointer;">View Live CDRs in Reports &rarr;</button>
+          </div>
+        </div>
+      `;
+    }
+
+    if (!isPaced) {
+      // Run fast mode
+      try {
+        const res = await fetch(`api.php?action=run_mock_volume_test&calls=${totalTarget}&fast=1`);
+        const data = await res.json();
+        this.finishMockTestUI(data, totalTarget, data.execution_time_sec || 0.5);
+      } catch (e) {
+        this.showToast('Test failed: ' + e.message, 'error');
+        this.stopMockVolumeTest();
+      }
+      return;
+    }
+
+    // Live real-time pacing mode (17 calls every second)
+    const startTime = Date.now();
+    let dispatched = 0;
+    let answered = 0;
+    let busyNoAns = 0;
+    let secElapsed = 0;
+
+    const timerInterval = setInterval(() => {
+      if (!this.isMockTestRunning) {
+        clearInterval(timerInterval);
+        return;
+      }
+      secElapsed++;
+      const mm = String(Math.floor(secElapsed / 60)).padStart(2, '0');
+      const ss = String(secElapsed % 60).padStart(2, '0');
+      const timerEl = document.getElementById('mockTestTimer');
+      if (timerEl) timerEl.textContent = `${mm}:${ss}`;
+    }, 1000);
+
+    const runBatch = async () => {
+      if (!this.isMockTestRunning) return;
+
+      const remaining = totalTarget - dispatched;
+      const batchSize = Math.min(17, remaining);
+      const isFirst = (dispatched === 0);
+
+      try {
+        const res = await fetch(`api.php?action=dispatch_mock_batch&size=${batchSize}&total_target=${totalTarget}${isFirst ? '&reset_first=1' : ''}`);
+        const data = await res.json();
+        if (data.success) {
+          dispatched += batchSize;
+          answered += (data.batch_outcomes?.answered || 0);
+          busyNoAns += ((data.batch_outcomes?.busy || 0) + (data.batch_outcomes?.no_answer || 0));
+
+          const elapsedSec = Math.max(0.1, (Date.now() - startTime) / 1000);
+          const currentCaps = (dispatched / elapsedSec).toFixed(1);
+          const currentCpm = Math.round(currentCaps * 60);
+          const pct = Math.min(100, Math.round((dispatched / totalTarget) * 100));
+
+          const barEl = document.getElementById('mockTestProgressBar');
+          if (barEl) barEl.style.width = pct + '%';
+
+          const countEl = document.getElementById('mockTestCount');
+          if (countEl) countEl.textContent = `${dispatched} / ${totalTarget} (${pct}%)`;
+
+          const cpmEl = document.getElementById('mockTestCpm');
+          if (cpmEl) cpmEl.textContent = `${currentCpm.toLocaleString()} CPM (${currentCaps}/s)`;
+
+          const chanEl = document.getElementById('mockTestChannels');
+          if (chanEl) chanEl.textContent = Math.min(500, Math.round(dispatched * 0.45));
+
+          const ansEl = document.getElementById('mockTestAnswered');
+          if (ansEl) ansEl.textContent = answered;
+
+          const busyEl = document.getElementById('mockTestBusy');
+          if (busyEl) busyEl.textContent = busyNoAns;
+
+          if (dispatched >= totalTarget) {
+            this.finishMockTestUI(null, totalTarget, elapsedSec, answered, busyNoAns);
+            return;
+          }
+
+          // Schedule next 1-second batch
+          this.mockTestTimeout = setTimeout(runBatch, 1000);
+        } else {
+          this.showToast(data.error || 'Batch failed', 'error');
+          this.stopMockVolumeTest();
+        }
+      } catch (e) {
+        this.showToast('Network error during mock dispatch: ' + e.message, 'error');
+        this.stopMockVolumeTest();
+      }
+    };
+
+    runBatch();
+  }
+
+  stopMockVolumeTest() {
+    this.isMockTestRunning = false;
+    if (this.mockTestTimeout) clearTimeout(this.mockTestTimeout);
+    const btn = document.getElementById('btnRunMockVolumeTest');
+    const btnStop = document.getElementById('btnStopMockVolumeTest');
+    if (btn) btn.style.display = 'inline-block';
+    if (btnStop) btnStop.style.display = 'none';
+    const titleEl = document.getElementById('mockTestHeaderTitle');
+    if (titleEl) titleEl.innerHTML = '⏹ Mock Test Stopped';
+  }
+
+  finishMockTestUI(data, totalTarget, elapsedSec, ansCount, busyCount) {
+    this.stopMockVolumeTest();
+    this.showToast(`1,000 CPM Mock Test Completed! Dispatched ${totalTarget} mock calls.`, 'success');
+    const titleEl = document.getElementById('mockTestHeaderTitle');
+    if (titleEl) titleEl.innerHTML = `✔ Mock Volume Test Completed Successfully (${totalTarget} Calls in ${elapsedSec ? elapsedSec.toFixed(1) : ''}s)`;
+    const barEl = document.getElementById('mockTestProgressBar');
+    if (barEl) barEl.style.width = '100%';
+    const countEl = document.getElementById('mockTestCount');
+    if (countEl) countEl.textContent = `${totalTarget} / ${totalTarget} (100%)`;
   }
 
   getTodayLeads() {
@@ -864,28 +1988,34 @@ class SkyKinDialerApp {
     }
   }
 
-  renderLeadsTables(search = '', filterStatus = 'all') {
+  renderLeadsTables(search = null, filterStatus = null) {
     const todayLeads = this.getTodayLeads();
-    const renderTarget = (tbodyEl) => {
+
+    const searchVal = (search !== null && search !== undefined) ? search : (document.getElementById('leadSearchInput')?.value || '');
+    const filterVal = (filterStatus !== null && filterStatus !== undefined) ? filterStatus : (document.getElementById('leadStatusFilter')?.value || 'all');
+    const query = searchVal.toLowerCase().trim();
+
+    const filtered = todayLeads.filter(l => {
+      const matchQuery = !query || 
+        (l.customer_name && l.customer_name.toLowerCase().includes(query)) ||
+        (l.phone_number && l.phone_number.includes(query)) ||
+        (l.account_number && l.account_number.toLowerCase().includes(query));
+      const matchStatus = filterVal === 'all' || l.status === filterVal;
+      return matchQuery && matchStatus;
+    });
+
+    const renderTarget = (tbodyEl, isFull = false) => {
       if (!tbodyEl) return;
       tbodyEl.innerHTML = '';
 
-      const query = search.toLowerCase().trim();
-      const filtered = todayLeads.filter(l => {
-        const matchQuery = !query || 
-          (l.customer_name && l.customer_name.toLowerCase().includes(query)) ||
-          (l.phone_number && l.phone_number.includes(query));
-        const matchStatus = filterStatus === 'all' || l.status === filterStatus;
-        return matchQuery && matchStatus;
-      });
-
       if (filtered.length === 0) {
+        const colCount = isFull ? 10 : 8;
         const rolloverBtn = this.remainingCount > 0
           ? `<div style="margin-top:12px;"><button class="btn btn-primary btn-sm" onclick="app.bulkRolloverRemainingToToday()">Roll Over ${this.remainingCount} Unanswered Calls from Previous Days</button></div>`
           : '';
-        tbodyEl.innerHTML = `<tr><td colspan="7" style="text-align:center;color:#64748b;padding:28px;">
-          <div style="font-size:14px;font-weight:700;color:#1e293b;margin-bottom:4px;">No calls in Today's List</div>
-          <div style="font-size:12px;color:#64748b;">Upload today's Excel file, quick-add contacts, or roll over past unanswered calls from History.</div>
+        tbodyEl.innerHTML = `<tr><td colspan="${colCount}" style="text-align:center;color:#64748b;padding:28px;">
+          <div style="font-size:14px;font-weight:700;color:#1e293b;margin-bottom:4px;">No contacts found matching filter</div>
+          <div style="font-size:12px;color:#64748b;">Upload Excel/CSV, quick-add contacts, or adjust search criteria.</div>
           ${rolloverBtn}
         </td></tr>`;
         return;
@@ -899,31 +2029,64 @@ class SkyKinDialerApp {
         const isImmediate = !l.call_time || l.call_time.toLowerCase() === 'immediate';
         const isDue = this.isLeadDueForCall(l);
         const timeBadgeStyle = (isImmediate || isDue)
-          ? 'background:#e0f2fe;color:#0369a1;padding:3px 8px;border-radius:12px;font-size:11px;font-weight:700;'
+          ? 'background:#dcfce7;color:#15803d;padding:3px 8px;border-radius:12px;font-size:11px;font-weight:700;'
           : 'background:#f8fafc;color:#475569;padding:3px 8px;border-radius:12px;font-size:11px;font-weight:600;border:1px solid #e2e8f0;';
 
-        tr.innerHTML = `
-          <td>${idx + 1}</td>
-          <td><strong>${this.escapeHtml(l.customer_name || 'Customer')}</strong></td>
-          <td>
-            <a href="javascript:void(0)" onclick="app.dialSingleLeadWithIvr(${l.id})" style="color:#0047AB;font-weight:700;text-decoration:none;" title="Click to Dial Outbound with IVR">
-              ${this.escapeHtml(l.phone_number)}
-            </a>
-          </td>
-          <td><span style="${timeBadgeStyle}" title="${isDue ? 'Ready to Call' : 'Scheduled for future'}">${this.escapeHtml(callTime)}</span></td>
-          <td>${stBadge}</td>
-          <td>${dur}</td>
-          <td>
-            <button class="btn btn-primary btn-sm" onclick="app.dialSingleLeadWithIvr(${l.id})" title="Outbound Call with IVR">Call</button>
-            <button class="btn btn-secondary btn-sm" onclick="app.deleteLead(${l.id})" style="color:#ef4444;" title="Delete">Delete</button>
-          </td>
-        `;
+        const acct = l.account_number ? `<span style="font-family:monospace;background:#f1f5f9;padding:2px 7px;border-radius:4px;font-size:11.5px;color:#0f5132;font-weight:600;">${this.escapeHtml(l.account_number)}</span>` : '<span style="color:#94a3b8;">-</span>';
+        const debtAmt = parseFloat(l.debt_amount || 0);
+        const curr = l.currency || 'ETB';
+        const debtFormatted = debtAmt > 0
+          ? `<span style="font-weight:700;color:#15803d;font-size:12.5px;">${curr} ${debtAmt.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</span>`
+          : `<span style="color:#64748b;font-size:12px;">0.00 ETB</span>`;
+
+        const campDisplay = l.campaign_name || this.campaign?.name || 'Campaign';
+        const campBadge = `<span class="sc-badge running" style="font-size:11px;font-weight:700;padding:2px 8px;white-space:nowrap;" title="Campaign: ${this.escapeHtml(campDisplay)}">${this.escapeHtml(campDisplay)}</span>`;
+
+        if (isFull) {
+          tr.innerHTML = `
+            <td>${idx + 1}</td>
+            <td><strong>${this.escapeHtml(l.customer_name || 'Customer')}</strong></td>
+            <td>
+              <a href="javascript:void(0)" onclick="app.clickToDial('${this.escapeHtml(l.phone_number)}', '${this.escapeHtml(l.customer_name)}')" style="color:#00A651;font-weight:700;text-decoration:none;" title="Click to Call with Softphone">
+                ${this.escapeHtml(l.phone_number)}
+              </a>
+            </td>
+            <td>${campBadge}</td>
+            <td>${acct}</td>
+            <td>${debtFormatted}</td>
+            <td><span style="${timeBadgeStyle}" title="${isDue ? 'Ready to Call' : 'Scheduled for future'}">${this.escapeHtml(callTime)}</span></td>
+            <td>${stBadge}</td>
+            <td>${dur}</td>
+            <td style="white-space:nowrap;">
+              <button class="btn btn-primary btn-sm" onclick="app.dialSingleLeadWithIvr(${l.id})" title="Outbound Call with IVR">Call</button>
+              <button class="btn btn-secondary btn-sm" onclick="app.deleteLead(${l.id})" style="color:#ef4444;margin-left:4px;" title="Delete">Delete</button>
+            </td>
+          `;
+        } else {
+          tr.innerHTML = `
+            <td>${idx + 1}</td>
+            <td><strong>${this.escapeHtml(l.customer_name || 'Customer')}</strong></td>
+            <td>
+              <a href="javascript:void(0)" onclick="app.dialSingleLeadWithIvr(${l.id})" style="color:#00A651;font-weight:700;text-decoration:none;" title="Click to Dial Outbound with IVR">
+                ${this.escapeHtml(l.phone_number)}
+              </a>
+            </td>
+            <td>${campBadge}</td>
+            <td><span style="${timeBadgeStyle}" title="${isDue ? 'Ready to Call' : 'Scheduled for future'}">${this.escapeHtml(callTime)}</span></td>
+            <td>${stBadge}</td>
+            <td>${dur}</td>
+            <td style="white-space:nowrap;">
+              <button class="btn btn-primary btn-sm" onclick="app.dialSingleLeadWithIvr(${l.id})" title="Outbound Call with IVR">Call</button>
+              <button class="btn btn-secondary btn-sm" onclick="app.deleteLead(${l.id})" style="color:#ef4444;" title="Delete">Delete</button>
+            </td>
+          `;
+        }
         tbodyEl.appendChild(tr);
       });
     };
 
-    renderTarget(this.leadsTableBody);
-    renderTarget(this.leadsTableBodyFull);
+    renderTarget(this.leadsTableBody, false);
+    renderTarget(this.leadsTableBodyFull, true);
   }
 
   /* ─────────────────────────────────────────────────────────
@@ -1009,10 +2172,10 @@ class SkyKinDialerApp {
 
       tr.innerHTML = `
         <td>${idx + 1}</td>
-        <td><span style="font-size:11.5px;font-weight:700;color:#0047AB;">${this.escapeHtml(effDate)}</span></td>
+        <td><span style="font-size:11.5px;font-weight:700;color:#00A651;">${this.escapeHtml(effDate)}</span></td>
         <td><strong>${this.escapeHtml(l.customer_name || 'Customer')}</strong></td>
         <td>
-          <a href="javascript:void(0)" onclick="app.clickToDial('${this.escapeHtml(l.phone_number)}', '${this.escapeHtml(l.customer_name)}')" style="color:#0047AB;font-weight:700;text-decoration:none;" title="Click to Call">
+          <a href="javascript:void(0)" onclick="app.clickToDial('${this.escapeHtml(l.phone_number)}', '${this.escapeHtml(l.customer_name)}')" style="color:#00A651;font-weight:700;text-decoration:none;" title="Click to Call">
             ${this.escapeHtml(l.phone_number)}
           </a>
         </td>
@@ -1046,77 +2209,132 @@ class SkyKinDialerApp {
     const lead = this.leads.find(l => Number(l.id) === Number(leadId));
     if (!lead) return;
 
-    document.getElementById('redialLeadId').value = lead.id;
-    document.getElementById('redialCustomerName').textContent = lead.customer_name || 'Customer';
-    document.getElementById('redialPhoneNumber').textContent = lead.phone_number || '';
+    const idInp = document.getElementById('redialLeadId');
+    const nameEl = document.getElementById('redialCustomerName');
+    const phoneEl = document.getElementById('redialPhoneNumber');
+    const dateInp = document.getElementById('redialDateInput');
+    const timeInp = document.getElementById('redialCustomTimeInput');
+
+    if (idInp) idInp.value = lead.id;
+    if (nameEl) nameEl.textContent = lead.customer_name || 'Customer';
+    if (phoneEl) phoneEl.textContent = lead.phone_number || '';
     
     const today = this.serverToday || new Date().toISOString().split('T')[0];
-    document.getElementById('redialDateInput').value = today;
-    document.getElementById('redialTimePreset').value = 'immediate';
-    const customTime = document.getElementById('redialCustomTimeInput');
-    if (customTime) customTime.style.display = 'none';
+    if (dateInp) dateInp.value = today;
 
+    const now = new Date();
+    const hh = String(now.getHours()).padStart(2, '0');
+    const mm = String(now.getMinutes()).padStart(2, '0');
+    if (timeInp) timeInp.value = `${hh}:${mm}`;
+
+    this.updateRedialPreview();
     this.openModal('modalRedialSchedule');
   }
 
-  handleRedialPresetChange(val) {
-    const customTime = document.getElementById('redialCustomTimeInput');
-    if (customTime) {
-      customTime.style.display = (val === 'custom') ? 'block' : 'none';
-      if (val === 'custom' && !customTime.value) {
-        const now = new Date();
-        const hh = String(now.getHours()).padStart(2, '0');
-        const mm = String(now.getMinutes()).padStart(2, '0');
-        customTime.value = `${hh}:${mm}`;
-      }
+  setRedialPreset(preset) {
+    const now = new Date();
+    let target = new Date();
+    let hoursStr = '09:00';
+
+    if (preset === '+15m') {
+      target = new Date(now.getTime() + 15 * 60000);
+      hoursStr = String(target.getHours()).padStart(2, '0') + ':' + String(target.getMinutes()).padStart(2, '0');
+    } else if (preset === '+1h') {
+      target = new Date(now.getTime() + 60 * 60000);
+      hoursStr = String(target.getHours()).padStart(2, '0') + ':' + String(target.getMinutes()).padStart(2, '0');
+    } else if (preset === '+3h') {
+      target = new Date(now.getTime() + 180 * 60000);
+      hoursStr = String(target.getHours()).padStart(2, '0') + ':' + String(target.getMinutes()).padStart(2, '0');
+    } else if (preset === 'tomorrow_am') {
+      target = new Date(now.getTime() + 86400000);
+      hoursStr = '09:00';
+    } else if (preset === 'tomorrow_pm') {
+      target = new Date(now.getTime() + 86400000);
+      hoursStr = '14:00';
+    } else if (preset === '+3days') {
+      target = new Date(now.getTime() + 3 * 86400000);
+      hoursStr = '10:00';
+    }
+
+    const yyyy = target.getFullYear();
+    const mm = String(target.getMonth() + 1).padStart(2, '0');
+    const dd = String(target.getDate()).padStart(2, '0');
+
+    const dateInp = document.getElementById('redialDateInput');
+    const timeInp = document.getElementById('redialCustomTimeInput');
+    if (dateInp) dateInp.value = `${yyyy}-${mm}-${dd}`;
+    if (timeInp) timeInp.value = hoursStr;
+
+    this.updateRedialPreview();
+  }
+
+  updateRedialPreview() {
+    const previewEl = document.getElementById('redialPreviewText');
+    const dateVal = document.getElementById('redialDateInput')?.value;
+    const timeVal = document.getElementById('redialCustomTimeInput')?.value || '09:00';
+
+    if (!previewEl) return;
+    if (!dateVal) {
+      previewEl.textContent = 'Please choose a date from the calendar.';
+      return;
+    }
+
+    try {
+      const dt = new Date(`${dateVal}T${timeVal}`);
+      const options = { weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' };
+      previewEl.textContent = `📅 Redial scheduled for: ${dt.toLocaleDateString('en-US', options)}`;
+    } catch (e) {
+      previewEl.textContent = `📅 Redial scheduled for: ${dateVal} at ${timeVal}`;
     }
   }
 
   async handleRedialSubmit(e) {
-    e.preventDefault();
-    const leadId = document.getElementById('redialLeadId').value;
-    const newDate = document.getElementById('redialDateInput').value;
-    const preset = document.getElementById('redialTimePreset').value;
-    const customTime = document.getElementById('redialCustomTimeInput')?.value || '';
+    if (e) e.preventDefault();
+    const leadId = document.getElementById('redialLeadId')?.value;
+    const newDate = document.getElementById('redialDateInput')?.value;
+    const customTime = document.getElementById('redialCustomTimeInput')?.value || '09:00';
 
-    let timeStr = 'Immediate';
-    if (preset === 'custom' && customTime) {
-      timeStr = customTime;
-    } else if (preset === '+2min') {
-      const d = new Date(Date.now() + 2 * 60000);
-      timeStr = `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
-    } else if (preset === '+5min') {
-      const d = new Date(Date.now() + 5 * 60000);
-      timeStr = `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
-    } else if (preset === '+10min') {
-      const d = new Date(Date.now() + 10 * 60000);
-      timeStr = `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
-    } else if (preset === '+30min') {
-      const d = new Date(Date.now() + 30 * 60000);
-      timeStr = `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+    if (!leadId || !newDate) {
+      this.showToast('Please select a date from the calendar.', 'error');
+      return;
     }
 
     try {
       const formData = new FormData();
       formData.append('lead_id', leadId);
       formData.append('new_date', newDate);
-      formData.append('new_time', timeStr);
+      formData.append('new_time', customTime);
 
       const res = await fetch('api.php?action=reschedule_lead', { method: 'POST', body: formData });
       const data = await res.json();
-      if (data.success) {
-        this.closeAllModals();
-        this.showToast(data.message, 'success');
+      if (data && data.success) {
+        this.closeModal('modalRedialSchedule');
+        this.showToast(data.message || 'Lead scheduled for redial', 'success');
         await this.loadCampaignData();
-        // If scheduled for today, switch to Auto-Dialer dashboard
-        if (newDate === (this.serverToday || new Date().toISOString().split('T')[0])) {
-          switchTab('tabLiveRoom');
-        }
+        await this.loadCallbacksList();
       } else {
         this.showToast(data.error || 'Failed to reschedule contact', 'error');
       }
     } catch(err) {
       this.showToast('Error rescheduling contact', 'error');
+    }
+  }
+
+  async requeueSingleLead(leadId) {
+    const formData = new FormData();
+    formData.append('lead_id', leadId);
+    try {
+      const res = await fetch('api.php?action=requeue_lead', { method: 'POST', body: formData });
+      const data = await res.json();
+      if (data && data.success) {
+        this.showToast(data.message || 'Lead re-queued into active calling queue', 'success');
+        await this.loadCallbacksList();
+        await this.loadCampaignData();
+      } else {
+        this.showToast(data.error || 'Failed to re-queue lead', 'error');
+      }
+    } catch (e) {
+      this.showToast('Network error re-queueing lead', 'error');
     }
   }
 
@@ -1185,50 +2403,350 @@ class SkyKinDialerApp {
     });
   }
 
+  async loadCallbacksList() {
+    try {
+      const res = await fetch('api.php?action=get_callbacks');
+      const data = await res.json();
+      if (!data.success) return;
+      this.callbacksList = data.callbacks || [];
+      this.renderUnansweredTable();
+    } catch (e) {
+      console.warn('loadCallbacksList error:', e);
+    }
+  }
+
   renderUnansweredTable() {
     const tbody = document.getElementById('unansweredTableBody');
     const badge = document.getElementById('badgeUnansweredCount');
 
-    const unansweredLeads = this.leads.filter(l => ['no_answer', 'busy', 'failed'].includes(l.status));
-    if (badge) badge.textContent = unansweredLeads.length;
+    const cbs = this.callbacksList || [];
+    const missed = (this.leads || []).filter(l => ['no_answer', 'busy', 'failed'].includes(l.status));
+    const totalCount = cbs.length + missed.length;
+    if (badge) badge.textContent = totalCount;
 
     if (!tbody) return;
     tbody.innerHTML = '';
 
-    if (unansweredLeads.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;color:#94a3b8;padding:24px;">No unanswered customer leads.</td></tr>`;
+    if (totalCount === 0) {
+      tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;color:#94a3b8;padding:24px;">No pending callbacks or missed leads.</td></tr>`;
       return;
     }
 
-    unansweredLeads.forEach((l, idx) => {
+    let rowIdx = 1;
+
+    // 1. Render Scheduled Callbacks from PostgreSQL
+    cbs.forEach(cb => {
+      const isCompleted = cb.status === 'completed';
+      const sched = cb.scheduled_time ? cb.scheduled_time.replace('T', ' ').substring(0, 16) : 'Scheduled';
+      const tr = document.createElement('tr');
+      tr.style.background = isCompleted ? '#ffffff' : '#f0fdf4';
+      tr.innerHTML = `
+        <td>${rowIdx++}</td>
+        <td><strong>${this.escapeHtml(cb.customer_name || 'Customer')}</strong></td>
+        <td>
+          <a href="javascript:void(0)" onclick="app.clickToDial('${this.escapeHtml(cb.phone_number)}', '${this.escapeHtml(cb.customer_name)}')" style="color:#00A651;font-weight:700;text-decoration:none;">
+            ${this.escapeHtml(cb.phone_number)}
+          </a>
+        </td>
+        <td>
+          <span class="sc-badge ${isCompleted ? 'done' : 'running'}" style="font-size:11px;">
+            ${isCompleted ? 'Completed' : 'Scheduled Callback'}
+          </span>
+          <small style="color:#475569;margin-left:6px;">${this.escapeHtml(cb.notes || '')}</small>
+        </td>
+        <td><span style="font-size:11.5px;color:#0369a1;font-weight:700;">${this.escapeHtml(sched)}</span></td>
+        <td style="font-size:11.5px;color:#64748b;">Assigned: Agent ${this.escapeHtml(cb.assigned_agent || '101')}</td>
+        <td style="white-space:nowrap;">
+          <button class="btn btn-primary btn-sm" onclick="app.clickToDial('${this.escapeHtml(cb.phone_number)}', '${this.escapeHtml(cb.customer_name)}')" title="Instant Call">
+            Dial
+          </button>
+          ${!isCompleted ? `
+            <button class="btn btn-success btn-sm" onclick="app.completeCallback(${cb.id})" style="margin-left:4px;" title="Mark Completed">✓</button>
+            <button class="btn btn-secondary btn-sm" onclick="app.openRescheduleModal(${cb.id}, '${this.escapeHtml(cb.customer_name)}', '${this.escapeHtml(cb.phone_number)}', '${cb.scheduled_time || ''}')" style="margin-left:4px;" title="Choose Date & Time with Calendar">📅</button>
+          ` : `
+            <button class="btn btn-secondary btn-sm" onclick="app.openRescheduleModal(${cb.id}, '${this.escapeHtml(cb.customer_name)}', '${this.escapeHtml(cb.phone_number)}', '${cb.scheduled_time || ''}')" style="margin-left:4px;" title="Reschedule Callback">📅</button>
+          `}
+        </td>
+      `;
+      tbody.appendChild(tr);
+    });
+
+    // 2. Render Unanswered / Busy Leads
+    missed.forEach(l => {
       const tr = document.createElement('tr');
       const stBadge = this.getStatusBadge(l.status);
       const lastAttempt = l.last_attempt_at || '-';
       const reason = l.error_message || (l.status === 'no_answer' ? 'No Answer / Timeout' : (l.status === 'busy' ? 'Busy Line' : 'Call Failed'));
 
       tr.innerHTML = `
-        <td>${idx + 1}</td>
+        <td>${rowIdx++}</td>
         <td><strong>${this.escapeHtml(l.customer_name || 'Customer')}</strong></td>
         <td>
-          <a href="javascript:void(0)" onclick="app.clickToDial('${this.escapeHtml(l.phone_number)}', '${this.escapeHtml(l.customer_name)}')" style="color:#0047AB;font-weight:700;text-decoration:none;">
+          <a href="javascript:void(0)" onclick="app.clickToDial('${this.escapeHtml(l.phone_number)}', '${this.escapeHtml(l.customer_name)}')" style="color:#00A651;font-weight:700;text-decoration:none;">
             ${this.escapeHtml(l.phone_number)}
           </a>
         </td>
         <td>${stBadge} <small style="color:#64748b;margin-left:4px;">(${this.escapeHtml(reason)})</small></td>
         <td><span style="font-size:11.5px;color:#0369a1;">${this.escapeHtml(l.call_time || '-')}</span></td>
         <td style="font-size:11.5px;color:#64748b;">${this.escapeHtml(lastAttempt)}</td>
-        <td>
-          <button class="btn btn-primary btn-sm" onclick="app.openRedialModal(${l.id})" title="Redial Customer">
-            Redial
-          </button>
-          <button class="btn btn-secondary btn-sm" onclick="app.requeueSingleLead(${l.id})" style="margin-left:4px;" title="Move back to Calling Queue">
-            Re-queue
-          </button>
+        <td style="white-space:nowrap;">
+          <button class="btn btn-primary btn-sm" onclick="app.clickToDial('${this.escapeHtml(l.phone_number)}', '${this.escapeHtml(l.customer_name)}')" title="Dial Customer">Dial</button>
+          <button class="btn btn-secondary btn-sm" onclick="app.requeueSingleLead(${l.id})" style="margin-left:4px;" title="Move back to Calling Queue">Re-queue</button>
+          <button class="btn btn-secondary btn-sm" onclick="app.openRedialModal(${l.id})" style="margin-left:4px;" title="Schedule with Calendar">📅</button>
         </td>
       `;
       tbody.appendChild(tr);
     });
   }
+
+  async completeCallback(callbackId) {
+    const formData = new FormData();
+    formData.append('callback_id', callbackId);
+    try {
+      const res = await fetch('api.php?action=complete_callback', { method: 'POST', body: formData });
+      const data = await res.json();
+      if (data.success) {
+        this.showToast('Callback marked completed in PostgreSQL', 'success');
+        this.loadCallbacksList();
+      }
+    } catch (e) {
+      this.showToast('Failed to update callback', 'error');
+    }
+  }
+
+  openRescheduleModal(callbackId, name = 'Customer', phone = '', scheduledTime = '') {
+    const idInp = document.getElementById('rescheduleCallbackId');
+    const nameEl = document.getElementById('rescheduleCustomerName');
+    const phoneEl = document.getElementById('reschedulePhoneNumber');
+    const dateInp = document.getElementById('rescheduleDateInput');
+    const timeInp = document.getElementById('rescheduleTimeInput');
+    const notesInp = document.getElementById('rescheduleNotesInput');
+
+    if (idInp) idInp.value = callbackId;
+    if (nameEl) nameEl.textContent = name || 'Customer';
+    if (phoneEl) phoneEl.textContent = phone || '';
+    if (notesInp) notesInp.value = '';
+
+    // If existing scheduled time is provided, parse it; otherwise default to tomorrow at 09:00
+    let targetDate = new Date(Date.now() + 86400000);
+    let hoursStr = '09:00';
+
+    if (scheduledTime && scheduledTime.length >= 10) {
+      try {
+        const parsed = new Date(scheduledTime.replace(' ', 'T'));
+        if (!isNaN(parsed.getTime())) {
+          targetDate = parsed;
+          hoursStr = String(parsed.getHours()).padStart(2, '0') + ':' + String(parsed.getMinutes()).padStart(2, '0');
+        }
+      } catch (e) {}
+    }
+
+    const yyyy = targetDate.getFullYear();
+    const mm = String(targetDate.getMonth() + 1).padStart(2, '0');
+    const dd = String(targetDate.getDate()).padStart(2, '0');
+
+    if (dateInp) dateInp.value = `${yyyy}-${mm}-${dd}`;
+    if (timeInp) timeInp.value = hoursStr;
+
+    this.updateReschedulePreview();
+    this.openModal('modalRescheduleCallback');
+  }
+
+  setReschedulePreset(preset) {
+    const now = new Date();
+    let target = new Date();
+    let hoursStr = '09:00';
+
+    if (preset === '+15m') {
+      target = new Date(now.getTime() + 15 * 60000);
+      hoursStr = String(target.getHours()).padStart(2, '0') + ':' + String(target.getMinutes()).padStart(2, '0');
+    } else if (preset === '+1h') {
+      target = new Date(now.getTime() + 60 * 60000);
+      hoursStr = String(target.getHours()).padStart(2, '0') + ':' + String(target.getMinutes()).padStart(2, '0');
+    } else if (preset === '+3h') {
+      target = new Date(now.getTime() + 180 * 60000);
+      hoursStr = String(target.getHours()).padStart(2, '0') + ':' + String(target.getMinutes()).padStart(2, '0');
+    } else if (preset === 'tomorrow_am') {
+      target = new Date(now.getTime() + 86400000);
+      hoursStr = '09:00';
+    } else if (preset === 'tomorrow_pm') {
+      target = new Date(now.getTime() + 86400000);
+      hoursStr = '14:00';
+    } else if (preset === '+3days') {
+      target = new Date(now.getTime() + 3 * 86400000);
+      hoursStr = '10:00';
+    }
+
+    const yyyy = target.getFullYear();
+    const mm = String(target.getMonth() + 1).padStart(2, '0');
+    const dd = String(target.getDate()).padStart(2, '0');
+
+    const dateInp = document.getElementById('rescheduleDateInput');
+    const timeInp = document.getElementById('rescheduleTimeInput');
+    if (dateInp) dateInp.value = `${yyyy}-${mm}-${dd}`;
+    if (timeInp) timeInp.value = hoursStr;
+
+    this.updateReschedulePreview();
+  }
+
+  updateReschedulePreview() {
+    const previewEl = document.getElementById('reschedulePreviewText');
+    const dateVal = document.getElementById('rescheduleDateInput')?.value;
+    const timeVal = document.getElementById('rescheduleTimeInput')?.value || '09:00';
+
+    if (!previewEl) return;
+    if (!dateVal) {
+      previewEl.textContent = 'Please choose a date from the calendar.';
+      return;
+    }
+
+    try {
+      const dt = new Date(`${dateVal}T${timeVal}`);
+      const options = { weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' };
+      previewEl.textContent = `📅 Scheduled for: ${dt.toLocaleDateString('en-US', options)}`;
+    } catch (e) {
+      previewEl.textContent = `📅 Scheduled for: ${dateVal} at ${timeVal}`;
+    }
+  }
+
+  async handleRescheduleSubmit(e) {
+    if (e) e.preventDefault();
+    const callbackId = document.getElementById('rescheduleCallbackId')?.value;
+    const dateVal = document.getElementById('rescheduleDateInput')?.value;
+    const timeVal = document.getElementById('rescheduleTimeInput')?.value || '09:00';
+    const notesVal = document.getElementById('rescheduleNotesInput')?.value.trim() || '';
+
+    if (!callbackId || !dateVal) {
+      this.showToast('Please select a date from the calendar.', 'error');
+      return;
+    }
+
+    const fullTimestamp = `${dateVal} ${timeVal}:00`;
+    const formData = new FormData();
+    formData.append('callback_id', callbackId);
+    formData.append('scheduled_time', fullTimestamp);
+    if (notesVal) formData.append('notes', notesVal);
+
+    try {
+      const res = await fetch('api.php?action=reschedule_callback', { method: 'POST', body: formData });
+      const data = await res.json();
+      if (data && data.success) {
+        this.showToast(`Callback successfully rescheduled for ${dateVal} at ${timeVal}!`, 'success');
+        this.closeModal('modalRescheduleCallback');
+        await this.loadCallbacksList();
+      } else {
+        this.showToast(data.error || 'Failed to reschedule callback.', 'error');
+      }
+    } catch (err) {
+      this.showToast('Network error rescheduling callback.', 'error');
+    }
+  }
+
+  async rescheduleCallback(callbackId) {
+    const cb = (this.callbacksList || []).find(c => Number(c.id) === Number(callbackId));
+    this.openRescheduleModal(callbackId, cb?.customer_name, cb?.phone_number, cb?.scheduled_time);
+  }
+
+  async loadDncList() {
+    try {
+      const res = await fetch('api.php?action=get_dnc_list');
+      const data = await res.json();
+      if (!data.success) return;
+      this.dncList = data.dnc_list || [];
+
+      const tbody = document.getElementById('dncTableBody');
+      const countTag = document.getElementById('dncCountTag');
+      if (countTag) countTag.textContent = this.dncList.length;
+
+      if (!tbody) return;
+      if (this.dncList.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;padding:24px;color:#64748b;">No numbers currently registered on Do-Not-Call list.</td></tr>`;
+        return;
+      }
+
+      tbody.innerHTML = this.dncList.map(item => {
+        const dateStr = item.created_at ? item.created_at.substring(0, 10) : 'Today';
+        return `
+          <tr style="border-bottom:1px solid #f0f5f1;">
+            <td style="font-weight:700;color:#0d2e1b;font-family:monospace;">${this.escapeHtml(item.phone_number)}</td>
+            <td style="font-size:12px;color:#526e5f;">${this.escapeHtml(item.reason || 'Customer opt-out')}</td>
+            <td style="font-size:11.5px;color:#64748b;">${this.escapeHtml(dateStr)}</td>
+            <td style="font-size:11.5px;color:#1a3d2a;">${this.escapeHtml(item.added_by || 'Agent')}</td>
+            <td style="text-align:right;">
+              <button class="btn btn-xs btn-danger" onclick="app.removeDncNumber(${item.id})" style="font-size:11px;padding:3px 8px;" title="Remove from DNC">
+                Unblock
+              </button>
+            </td>
+          </tr>
+        `;
+      }).join('');
+    } catch (e) {
+      console.warn('loadDncList error:', e);
+    }
+  }
+
+  async handleAddDncSubmit(e) {
+    e.preventDefault();
+    const phoneInput = document.getElementById('dncInputPhone');
+    const reasonSelect = document.getElementById('dncInputReason');
+    const phone = phoneInput ? phoneInput.value.trim() : '';
+    const reason = reasonSelect ? reasonSelect.value : '';
+
+    if (!phone) {
+      this.showToast('Please enter a phone number', 'warning');
+      return;
+    }
+
+    const formData = new FormData();
+    formData.append('phone_number', phone);
+    formData.append('reason', reason);
+
+    try {
+      const res = await fetch('api.php?action=add_dnc_number', { method: 'POST', body: formData });
+      const data = await res.json();
+      if (data.success) {
+        this.showToast(data.message || 'Number added to DNC list!', 'success');
+        if (phoneInput) phoneInput.value = '';
+        await this.loadDncList();
+        await this.loadCampaignData();
+      } else {
+        this.showToast(data.error || 'Failed to add number to DNC', 'error');
+      }
+    } catch (err) {
+      this.showToast('Network error adding to DNC', 'error');
+    }
+  }
+
+  async removeDncNumber(id) {
+    if (!confirm('Are you sure you want to remove this number from the Do-Not-Call registry?')) return;
+    const formData = new FormData();
+    formData.append('id', id);
+    try {
+      const res = await fetch('api.php?action=remove_dnc_number', { method: 'POST', body: formData });
+      const data = await res.json();
+      if (data.success) {
+        this.showToast('Number removed from DNC list', 'info');
+        this.loadDncList();
+      }
+    } catch (e) {
+      this.showToast('Failed to remove number from DNC', 'error');
+    }
+  }
+
+  async scrubQueueDnc() {
+    this.showToast('Running pre-dial regulatory DNC scrub...', 'info');
+    try {
+      const res = await fetch('api.php?action=scrub_dnc_queue', { method: 'POST' });
+      const data = await res.json();
+      if (data.success) {
+        this.showToast(data.message, 'success');
+        await this.loadCampaignData();
+      }
+    } catch (e) {
+      this.showToast('Failed to run DNC scrub', 'error');
+    }
+  }
+
 
   async requeueUnansweredLeads() {
     let count = 0;
@@ -1345,7 +2863,7 @@ class SkyKinDialerApp {
       const tr = document.createElement('tr');
       tr.innerHTML = `
         <td>${idx + 1}</td>
-        <td><strong style="color:#0047AB;">${this.escapeHtml(a.name)}</strong></td>
+        <td><strong style="color:#00A651;">${this.escapeHtml(a.name)}</strong></td>
         <td style="font-size:12px;color:#64748b;font-family:monospace;">${this.escapeHtml(a.filename || a.filepath)}</td>
         <td>
           ${isActive 
@@ -1806,7 +3324,7 @@ class SkyKinDialerApp {
 
   async dialCustomerLead(lead, lineNum = 1, pacingDelay = 2) {
     const channelId = `ch_l${lineNum}_${lead.id}_${Date.now()}`;
-    const audioSrc = this.campaign?.ivr_audio_file || 'assets/audio/welcome_human_voice.wav';
+    const audioSrc = lead.ivr_audio_file || this.campaign?.ivr_audio_file || 'assets/audio/welcome_human_voice.wav';
     const dom = localStorage.getItem('sip_domain') || this.sipDomain || 'client1.skykin.local';
 
     const lineObj = lineNum === 2 ? this.line2 : this.line1;
@@ -1933,23 +3451,25 @@ class SkyKinDialerApp {
         const mins = Math.floor(ch.duration / 60);
         const secs = ch.duration % 60;
         const durStr = `${String(mins).padStart(2,'0')}:${String(secs).padStart(2,'0')}`;
+        const campDisplay = ch.lead.campaign_name || this.campaign?.name || 'Outbound';
+        const audioNameDisplay = ch.lead.ivr_audio_name || this.campaign?.ivr_audio_name || 'Human Greeting';
         const card = document.createElement('div');
         card.className = `channel-card ${ch.status === 'answered' ? 'connected' : 'ringing'}`;
         card.innerHTML = `
           <div class="ch-header">
             <span class="ch-badge ${ch.status === 'answered' ? 'active' : 'dialing'}">
-              Line ${ch.lineNum} (Ext ${ch.lineExt}) &bull; ${ch.status === 'answered' ? 'IVR Playing' : 'Dialing...'}
+              Line ${ch.lineNum} (Ext ${ch.lineExt}) &bull; ${ch.status === 'answered' ? 'IVR Playing: ' + this.escapeHtml(campDisplay) : 'Dialing...'}
             </span>
-            <span style="font-family:monospace;font-weight:700;color:#0047AB;">${durStr}</span>
+            <span style="font-family:monospace;font-weight:700;color:#0c3629;">${durStr}</span>
           </div>
           <div style="font-weight:700;font-size:14px;color:#1e293b;margin-bottom:2px;">
             ${this.escapeHtml(ch.lead.customer_name || 'Customer')}
           </div>
           <div style="font-size:12px;color:#64748b;margin-bottom:6px;">
-            ${this.escapeHtml(ch.lead.phone_number)}
+            ${this.escapeHtml(ch.lead.phone_number)} &bull; <span style="color:#00A651;font-weight:700;">${this.escapeHtml(campDisplay)}</span>
           </div>
-          <div style="font-size:11px;color:#0284c7;background:#e0f2fe;padding:4px 8px;border-radius:4px;display:flex;justify-content:space-between;align-items:center;">
-            <span>${this.escapeHtml(this.campaign?.ivr_audio_name || 'Human Greeting')}</span>
+          <div style="font-size:11px;color:#0c3629;background:#eaf8f0;border:1px solid #bce8ce;padding:4px 8px;border-radius:4px;display:flex;justify-content:space-between;align-items:center;">
+            <span>${this.escapeHtml(audioNameDisplay)}</span>
             <button class="btn btn-secondary btn-sm" onclick="app.sipHangup(${ch.lineNum})" style="padding:1px 6px;font-size:10px;height:auto;line-height:1.2;">End Call</button>
           </div>
         `;
@@ -1998,7 +3518,7 @@ class SkyKinDialerApp {
           <div style="font-size:14px;color:#1e293b;font-weight:600;margin-bottom:4px;">
             ${this.escapeHtml(next.customer_name || 'Customer')}
             <span style="color:#64748b;font-weight:400;"> &mdash; </span>
-            <a href="javascript:void(0)" onclick="app.clickToDial('${this.escapeHtml(next.phone_number)}')" style="color:#0047AB;font-weight:700;text-decoration:none;">${this.escapeHtml(next.phone_number)}</a>
+            <a href="javascript:void(0)" onclick="app.clickToDial('${this.escapeHtml(next.phone_number)}')" style="color:#00A651;font-weight:700;text-decoration:none;">${this.escapeHtml(next.phone_number)}</a>
           </div>
           <div style="font-size:12.5px;color:#166534;margin-bottom:8px;">
             Scheduled: <strong>${this.escapeHtml(next.call_time || 'Immediate')}</strong>
@@ -2031,8 +3551,8 @@ class SkyKinDialerApp {
 
     const countdownIdIdle = `cd_idle_${Date.now()}`;
     this.channelsContainer.innerHTML = `
-      <div style="grid-column:1/-1;background:#f8fafc;border:1.5px dashed #93c5fd;border-radius:10px;padding:16px 18px;text-align:center;">
-        <div style="font-weight:700;color:#0047AB;font-size:13px;margin-bottom:4px;">
+      <div style="grid-column:1/-1;background:#f8fafc;border:1.5px dashed #bce8ce;border-radius:10px;padding:16px 18px;text-align:center;">
+        <div style="font-weight:700;color:#00A651;font-size:13px;margin-bottom:4px;">
           Next Scheduled Call
         </div>
         <div style="font-size:14px;color:#1e293b;font-weight:600;margin-bottom:3px;">
@@ -2294,6 +3814,8 @@ class SkyKinDialerApp {
     if (e) e.preventDefault();
     const nameInp = document.getElementById('modalAddName');
     const phoneInp = document.getElementById('modalAddPhone');
+    const acctInp = document.getElementById('modalAddAccount');
+    const debtInp = document.getElementById('modalAddDebt');
     const presetSelect = document.getElementById('modalAddTimePreset');
     const customDate = document.getElementById('modalAddCustomDate')?.value;
     const customTime = document.getElementById('modalAddCustomTime')?.value;
@@ -2301,6 +3823,8 @@ class SkyKinDialerApp {
 
     const name = nameInp?.value.trim() || 'Customer';
     const phone = phoneInp?.value.trim() || '';
+    const account = acctInp?.value.trim() || '';
+    const debt = debtInp?.value.trim() || '0.00';
     const notes = notesInp?.value.trim() || 'Quick Add';
     const callTime = this.getCalculatedCallTime(presetSelect?.value, customDate, customTime);
 
@@ -2310,33 +3834,33 @@ class SkyKinDialerApp {
     }
 
     try {
+      const targetCampaignId = document.getElementById('singleAddCampaignSelect')?.value || this.activeCampaignId || this.campaign?.id || 1;
       const formData = new FormData();
-      formData.append('campaign_id', this.campaign?.id || 1);
+      formData.append('campaign_id', targetCampaignId);
       formData.append('customer_name', name);
       formData.append('phone_number', phone);
+      formData.append('account_number', account);
+      formData.append('debt_amount', debt);
       formData.append('call_time', callTime);
       formData.append('notes', notes);
 
       const res = await fetch('api.php?action=add_single_lead', { method: 'POST', body: formData });
       const data = await res.json();
       if (data.success) {
-        this.showToast(data.message || `Contact ${name} added to queue!`, 'success');
+        this.showToast(data.message || `Contact ${name} added to PostgreSQL queue!`, 'success');
         if (nameInp) nameInp.value = '';
         if (phoneInp) phoneInp.value = '';
+        if (acctInp) acctInp.value = '';
+        if (debtInp) debtInp.value = '';
         if (notesInp) notesInp.value = '';
         if (presetSelect) presetSelect.value = 'immediate';
         const wrap = document.getElementById('modalCustomDateTimeWrap');
         if (wrap) wrap.style.display = 'none';
 
-        this.closeAllModals();
-        if (data.lead) {
-          this.leads.push(data.lead);
-          this.renderLeadsTables();
-          this.renderUnansweredTable();
-          this.updateLocalStats();
-          this.renderActiveChannels();
-        } else {
-          this.loadCampaignData();
+        this.closeModal('modalSingleAdd');
+        await this.loadCampaignsOverview();
+        if (String(this.campaign?.id) === String(targetCampaignId)) {
+          await this.loadCampaignData(targetCampaignId);
         }
       } else {
         this.showToast(data.error || 'Failed to add contact', 'error');
@@ -2410,12 +3934,13 @@ class SkyKinDialerApp {
     if (e) e.preventDefault();
     const fileInp = document.getElementById('leadFileInput');
     if (!fileInp || !fileInp.files || fileInp.files.length === 0) {
-      this.showToast('Please select a CSV or TXT file to upload.', 'error');
+      this.showToast('Please select a CSV, Excel, or TXT file to upload.', 'error');
       return;
     }
+    const targetCampaignId = document.getElementById('uploadCampaignSelect')?.value || this.activeCampaignId || this.campaign?.id || 1;
     const formData = new FormData();
     formData.append('lead_file', fileInp.files[0]);
-    formData.append('campaign_id', this.campaign?.id || 1);
+    formData.append('campaign_id', targetCampaignId);
 
     this.showToast('Importing customer leads...', 'info');
     try {
@@ -2428,13 +3953,16 @@ class SkyKinDialerApp {
         if (nameLabel) nameLabel.textContent = '';
         this.closeAllModals();
 
-        if (data.leads && Array.isArray(data.leads)) {
-          this.leads = data.leads;
-          this.renderLeadsTables();
-          this.renderUnansweredTable();
-          this.updateLocalStats();
-        } else {
-          await this.loadCampaignData();
+        await this.loadCampaignsOverview();
+        if (String(this.campaign?.id) === String(targetCampaignId)) {
+          if (data.leads && Array.isArray(data.leads)) {
+            this.leads = data.leads;
+            this.renderLeadsTables();
+            this.renderUnansweredTable();
+            this.updateLocalStats();
+          } else {
+            await this.loadCampaignData(targetCampaignId);
+          }
         }
       } else {
         this.showToast(data.error || 'Failed to import file', 'error');
@@ -2452,9 +3980,10 @@ class SkyKinDialerApp {
       this.showToast('Please enter at least one contact line', 'error');
       return;
     }
+    const targetCampaignId = document.getElementById('manualCampaignSelect')?.value || this.activeCampaignId || this.campaign?.id || 1;
     const formData = new FormData();
     formData.append('leads_text', text);
-    formData.append('campaign_id', this.campaign?.id || 1);
+    formData.append('campaign_id', targetCampaignId);
 
     try {
       const res = await fetch('api.php?action=save_manual_leads', { method: 'POST', body: formData });
@@ -2463,7 +3992,11 @@ class SkyKinDialerApp {
         this.showToast(data.message || `Added ${data.imported} leads!`, 'success');
         if (textInp) textInp.value = '';
         this.closeAllModals();
-        await this.loadCampaignData();
+
+        await this.loadCampaignsOverview();
+        if (String(this.campaign?.id) === String(targetCampaignId)) {
+          await this.loadCampaignData(targetCampaignId);
+        }
       } else {
         this.showToast(data.error || 'Failed to add leads', 'error');
       }
@@ -2699,3 +4232,27 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 });
+
+window.openModal = function(id) {
+  if (window.app) window.app.openModal(id);
+  else document.getElementById(id)?.classList.add('open');
+};
+window.closeModal = function(id) {
+  if (window.app) window.app.closeModal(id);
+  else document.getElementById(id)?.classList.remove('open');
+};
+
+window.selectCampaignForDesigner = function(id) {
+  if (window.app && window.app.selectCampaignForDesigner) {
+    window.app.selectCampaignForDesigner(id);
+  } else if (typeof window.switchCampaignSubView === 'function') {
+    window.switchCampaignSubView('designer');
+  } else {
+    const listEl = document.getElementById('subViewCampaignsList');
+    const designerEl = document.getElementById('subViewCampaignsDesigner');
+    if (listEl) listEl.style.display = 'none';
+    if (designerEl) designerEl.style.display = 'block';
+  }
+};
+
+

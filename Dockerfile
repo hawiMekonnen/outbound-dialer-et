@@ -10,6 +10,7 @@ WORKDIR /var/www/html
 
 # Install system dependencies & libraries
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq-dev \
     libsqlite3-dev \
     libzip-dev \
     zip \
@@ -19,6 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Install and configure PHP extensions
 RUN docker-php-ext-install -j$(nproc) \
+    pdo_pgsql \
     pdo_sqlite \
     opcache \
     zip
@@ -30,7 +32,7 @@ RUN a2enmod rewrite headers
 RUN { \
     echo 'upload_max_filesize = 50M'; \
     echo 'post_max_size = 50M'; \
-    echo 'memory_limit = 256M'; \
+    echo 'memory_limit = 512M'; \
     echo 'max_execution_time = 300'; \
     echo 'max_input_time = 300'; \
     echo 'date.timezone = UTC'; \

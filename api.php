@@ -22,16 +22,37 @@ function sanitizePhone(string $raw): string {
     $cleaned = preg_replace('/[^\d+]/', '', trim($raw));
     if (empty($cleaned)) return '';
     
+    // Normalize international dial-out prefix 00251 to +251
+    if (str_starts_with($cleaned, '00251')) {
+        $cleaned = '+251' . substr($cleaned, 5);
+    }
+    
+    // Ethiopian local 10-digit mobile (09... Ethio Telecom, 07... Safaricom)
     if (preg_match('/^0([97]\d{8})$/', $cleaned, $m)) {
         return '+251' . $m[1];
     }
-    if (preg_match('/^251([97]\d{8})$/', $cleaned, $m)) {
+    // Ethiopian local 10-digit fixed line (011... Addis Ababa, 022, 025, 033, 034, 046, 058)
+    if (preg_match('/^0([1-5]\d{8})$/', $cleaned, $m)) {
         return '+251' . $m[1];
     }
-    if ($cleaned[0] !== '+') {
+    // Ethiopian 12-digit without plus prefix (2519..., 2517..., 25111...)
+    if (preg_match('/^251([1-9]\d{8})$/', $cleaned, $m)) {
+        return '+251' . $m[1];
+    }
+    // Already in standard +251 E.164 format
+    if (preg_match('/^\+251([1-9]\d{8})$/', $cleaned)) {
+        return $cleaned;
+    }
+    // General international E.164 format (+ followed by 8 to 15 digits)
+    if (preg_match('/^\+[1-9]\d{7,14}$/', $cleaned)) {
+        return $cleaned;
+    }
+    // Pure numeric international format without plus
+    if (preg_match('/^[1-9]\d{7,14}$/', $cleaned)) {
         return '+' . $cleaned;
     }
-    return $cleaned;
+    
+    return '';
 }
 
 function extractLeadDate(?string $callTime, ?string $createdAt): string {
@@ -58,25 +79,352 @@ function extractLeadDate(?string $callTime, ?string $createdAt): string {
     return date('Y-m-d');
 }
 
-// 1. Get Campaign Dashboard Data
-if ($action === 'get_campaign_data') {
+// 0. Get All Campaigns for Campaigns Overview Table
+if ($action === 'get_all_campaigns') {
+    $stmt = $db->query("SELECT c.*, 
+        (SELECT COUNT(*) FROM leads WHERE campaign_id = c.id) as total_leads_count,
+        (SELECT COUNT(*) FROM leads WHERE campaign_id = c.id AND status IN ('completed', 'answered', 'ivr_completed')) as completed_leads_count,
+        (SELECT COUNT(*) FROM leads WHERE campaign_id = c.id AND status = 'pending') as pending_leads_count,
+        (SELECT COUNT(*) FROM leads WHERE campaign_id = c.id AND status = 'busy') as busy_leads_count,
+        (SELECT COUNT(*) FROM leads WHERE campaign_id = c.id AND status = 'no_answer') as no_answer_leads_count
+        FROM campaigns c ORDER BY c.id ASC");
+    $campaigns = $stmt->fetchAll();
+    jsonOut(['success' => true, 'campaigns' => $campaigns]);
+}
+
+// Create New Campaign
+if ($action === 'create_campaign') {
+    $name = trim($_POST['name'] ?? 'New Outbound Campaign');
+    $type = trim($_POST['type'] ?? 'agentless');
+    $callerIdName = trim($_POST['caller_id_name'] ?? 'Ethio Telecom');
+    $callerIdNumber = trim($_POST['caller_id_number'] ?? '+251911002233');
+    $language = trim($_POST['language'] ?? 'amharic');
+    $messageText = trim($_POST['message_text'] ?? '');
+    $audioFile = trim($_POST['audio_file'] ?? 'assets/audio/welcome_human_voice.wav');
+
+    $stmt = $db->prepare("INSERT INTO campaigns (name, type, status, caller_id_name, caller_id_number, ivr_language, ivr_message_text, ivr_audio_file, created_by) VALUES (?, ?, 'idle', ?, ?, ?, ?, ?, ?)");
+    $stmt->execute([$name, $type, $callerIdName, $callerIdNumber, $language, $messageText, $audioFile, $_SESSION['username'] ?? 'Agent1']);
+    $newId = (int)$db->lastInsertId();
+
+    jsonOut(['success' => true, 'campaign_id' => $newId, 'message' => 'Campaign created successfully']);
+}
+
+// Toggle Campaign Running / Idle Status
+if ($action === 'toggle_campaign_status') {
+    $campaignId = (int)($_POST['campaign_id'] ?? 0);
+    $status = trim($_POST['status'] ?? 'idle');
+    $db->prepare("UPDATE campaigns SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")->execute([$status, $campaignId]);
+    jsonOut(['success' => true, 'status' => $status]);
+}
+
+// Delete Campaign
+if ($action === 'delete_campaign') {
+    $campaignId = (int)($_POST['campaign_id'] ?? 0);
+    if ($campaignId <= 1) {
+        jsonOut(['success' => false, 'error' => 'Cannot delete default primary campaign.'], 400);
+    }
+    $db->prepare("DELETE FROM campaigns WHERE id = ?")->execute([$campaignId]);
+    jsonOut(['success' => true]);
+}
+
+// Save Message Designer & IVR Settings
+if ($action === 'save_campaign_designer') {
+    $campaignId = (int)($_POST['campaign_id'] ?? 1);
+    $name = trim($_POST['name'] ?? '');
+    $language = trim($_POST['language'] ?? 'amharic');
+    $messageText = trim($_POST['message_text'] ?? '');
+    $audioFile = trim($_POST['audio_file'] ?? '');
+    $audioName = trim($_POST['audio_name'] ?? '');
+    $type = trim($_POST['type'] ?? '');
+
+    $updates = [];
+    $params = [];
+    if (!empty($name)) { $updates[] = "name = ?"; $params[] = $name; }
+    if (!empty($language)) { $updates[] = "ivr_language = ?"; $params[] = $language; }
+    if ($messageText !== '') { $updates[] = "ivr_message_text = ?"; $params[] = $messageText; }
+    if (!empty($audioFile)) { $updates[] = "ivr_audio_file = ?"; $params[] = $audioFile; }
+    if (!empty($audioName)) { $updates[] = "ivr_audio_name = ?"; $params[] = $audioName; }
+    if (!empty($type)) { $updates[] = "type = ?"; $params[] = $type; }
+
+    if (!empty($updates)) {
+        $updates[] = "updated_at = CURRENT_TIMESTAMP";
+        $sql = "UPDATE campaigns SET " . implode(', ', $updates) . " WHERE id = ?";
+        $params[] = $campaignId;
+        $stmt = $db->prepare($sql);
+        $stmt->execute($params);
+    }
+    jsonOut(['success' => true, 'message' => 'Campaign designer settings saved successfully']);
+}
+
+// Set Campaign Status (Launch / Pause / Stop)
+if ($action === 'set_campaign_status') {
+    $campaignId = (int)($_POST['campaign_id'] ?? 1);
+    $status = trim($_POST['status'] ?? 'idle');
+
+    $stmt = $db->prepare("UPDATE campaigns SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?");
+    $stmt->execute([$status, $campaignId]);
+    jsonOut(['success' => true, 'status' => $status, 'campaign_id' => $campaignId]);
+}
+
+// Phase 2: Get Top Pending Lead for Agent Screen
+if ($action === 'get_active_queue_lead') {
     $campaignId = (int)($_GET['campaign_id'] ?? 1);
-
-    $stmt = $db->prepare("SELECT * FROM campaigns WHERE id = ?");
+    $stmt = $db->prepare("SELECT * FROM leads WHERE campaign_id = ? AND status = 'pending' ORDER BY priority DESC, id ASC LIMIT 1");
     $stmt->execute([$campaignId]);
-    $campaign = $stmt->fetch();
+    $lead = $stmt->fetch();
+    jsonOut(['success' => true, 'lead' => $lead ?: null]);
+}
 
-    if (!$campaign) {
-        $db->exec("INSERT INTO campaigns (name, status) VALUES ('Outbound Customer Calls', 'idle')");
-        $campaignId = (int)$db->lastInsertId();
-        $stmt = $db->prepare("SELECT * FROM campaigns WHERE id = ?");
-        $stmt->execute([$campaignId]);
-        $campaign = $stmt->fetch();
+// Phase 2: Save Agent Disposition Outcome & Fetch Next Lead
+if ($action === 'save_agent_outcome') {
+    $leadId = (int)($_POST['lead_id'] ?? 0);
+    $campaignId = (int)($_POST['campaign_id'] ?? 1);
+    $disposition = trim($_POST['disposition'] ?? 'completed');
+    $promiseDate = trim($_POST['promise_date'] ?? '');
+    $duration = (int)($_POST['duration_sec'] ?? 0);
+    $notes = trim($_POST['notes'] ?? '');
+    $agentExt = $_SESSION['dialer_user']['sip_extension'] ?? $_SESSION['dialer_user']['extension'] ?? '101';
+
+    if ($leadId > 0) {
+        $leadStmt = $db->prepare("SELECT * FROM leads WHERE id = ?");
+        $leadStmt->execute([$leadId]);
+        $lead = $leadStmt->fetch();
+
+        if ($lead) {
+            $statusMap = [
+                'promise_to_pay' => 'completed',
+                'paid_now' => 'completed',
+                'callback' => 'scheduled',
+                'no_answer' => 'no_answer',
+                'wrong_number' => 'failed',
+                'completed' => 'completed'
+            ];
+            $leadStatus = $statusMap[$disposition] ?? 'completed';
+            $combinedNotes = $notes;
+            if (!empty($promiseDate)) {
+                $combinedNotes .= ($combinedNotes ? " | " : "") . "Promise Date: " . $promiseDate;
+            }
+
+            // Update lead
+            $updLead = $db->prepare("UPDATE leads SET status = ?, duration_sec = ?, notes = ?, last_attempt_at = CURRENT_TIMESTAMP WHERE id = ?");
+            $updLead->execute([$leadStatus, $duration, $combinedNotes, $leadId]);
+
+            // Insert CDR call_log
+            $insLog = $db->prepare("INSERT INTO call_logs (lead_id, campaign_id, customer_name, phone_number, call_time, agent_extension, status, duration_sec, dtmf_pressed, cost_etb) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+            $costEtb = round(($duration / 60) * 0.50, 2);
+            $insLog->execute([
+                $leadId,
+                $lead['campaign_id'],
+                $lead['customer_name'],
+                $lead['phone_number'],
+                $lead['call_time'] ?? date('h:i A'),
+                $agentExt,
+                strtoupper($disposition),
+                $duration,
+                $disposition === 'paid_now' ? '1' : ($disposition === 'callback' ? '2' : '3'),
+                $costEtb
+            ]);
+
+            // If callback requested or promise to pay, schedule in callbacks table
+            if ($disposition === 'callback' || $disposition === 'promise_to_pay') {
+                $schedTime = date('Y-m-d H:i:s', strtotime('+2 hours'));
+                if ($promiseDate && strtotime($promiseDate) > time()) {
+                    $schedTime = date('Y-m-d H:i:s', strtotime($promiseDate));
+                }
+                $insCb = $db->prepare("INSERT INTO scheduled_callbacks (lead_id, campaign_id, customer_name, phone_number, scheduled_time, assigned_agent, status, notes) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)");
+                $insCb->execute([
+                    $leadId,
+                    $lead['campaign_id'],
+                    $lead['customer_name'],
+                    $lead['phone_number'],
+                    $schedTime,
+                    $agentExt,
+                    "Outcome: " . strtoupper(str_replace('_', ' ', $disposition)) . ($notes ? " - " . $notes : "")
+                ]);
+            }
+        }
     }
 
-    // Get Leads
-    $stmtLeads = $db->prepare("SELECT * FROM leads WHERE campaign_id = ? ORDER BY id ASC");
-    $stmtLeads->execute([$campaignId]);
+    // Fetch next pending lead
+    $nextStmt = $db->prepare("SELECT * FROM leads WHERE campaign_id = ? AND status = 'pending' ORDER BY priority DESC, id ASC LIMIT 1");
+    $nextStmt->execute([$campaignId]);
+    $nextLead = $nextStmt->fetch();
+
+    jsonOut([
+        'success' => true,
+        'message' => 'Call outcome recorded to PostgreSQL call_logs and customer record',
+        'next_lead' => $nextLead ?: null
+    ]);
+}
+
+// Phase 2: Set Dialing Pacing Mode
+if ($action === 'set_pacing_mode') {
+    $campaignId = (int)($_POST['campaign_id'] ?? 1);
+    $mode = trim($_POST['pacing_mode'] ?? 'progressive');
+
+    $stmt = $db->prepare("UPDATE campaigns SET type = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?");
+    $stmt->execute([$mode, $campaignId]);
+    jsonOut(['success' => true, 'pacing_mode' => $mode]);
+}
+
+// Phase 4: Get Scheduled Callbacks
+if ($action === 'get_callbacks') {
+    $campaignId = (int)($_GET['campaign_id'] ?? 0);
+    $sql = "SELECT c.*, l.customer_name as lead_name, l.debt_amount, l.currency FROM scheduled_callbacks c LEFT JOIN leads l ON c.lead_id = l.id ORDER BY c.scheduled_time ASC";
+    $cbs = $db->query($sql)->fetchAll();
+    jsonOut(['success' => true, 'callbacks' => $cbs]);
+}
+
+// Phase 4: Complete Callback
+if ($action === 'complete_callback') {
+    $id = (int)($_POST['callback_id'] ?? 0);
+    $db->prepare("UPDATE scheduled_callbacks SET status = 'completed' WHERE id = ?")->execute([$id]);
+    jsonOut(['success' => true]);
+}
+
+// Phase 4: Reschedule Callback
+if ($action === 'reschedule_callback') {
+    $id = (int)($_POST['callback_id'] ?? 0);
+    $newTime = trim($_POST['scheduled_time'] ?? date('Y-m-d H:i:s', strtotime('+24 hours')));
+    $notes = trim($_POST['notes'] ?? '');
+    if (!empty($notes)) {
+        $db->prepare("UPDATE scheduled_callbacks SET scheduled_time = ?, notes = ?, status = 'pending' WHERE id = ?")->execute([$newTime, $notes, $id]);
+    } else {
+        $db->prepare("UPDATE scheduled_callbacks SET scheduled_time = ?, status = 'pending' WHERE id = ?")->execute([$newTime, $id]);
+    }
+    jsonOut(['success' => true]);
+}
+
+// Phase 4: Reschedule Lead
+if ($action === 'reschedule_lead') {
+    $leadId = (int)($_POST['lead_id'] ?? 0);
+    $newDate = trim($_POST['new_date'] ?? date('Y-m-d'));
+    $newTime = trim($_POST['new_time'] ?? '09:00');
+    $callTimeStr = "$newDate $newTime";
+    $stmt = $db->prepare("UPDATE leads SET call_time = ?, status = 'pending' WHERE id = ?");
+    $stmt->execute([$callTimeStr, $leadId]);
+    jsonOut(['success' => true, 'message' => "Lead rescheduled for $newDate at $newTime"]);
+}
+
+// Phase 4: Re-queue Lead
+if ($action === 'requeue_lead') {
+    $leadId = (int)($_POST['lead_id'] ?? 0);
+    $stmt = $db->prepare("UPDATE leads SET status = 'pending', retry_count = 0 WHERE id = ?");
+    $stmt->execute([$leadId]);
+    jsonOut(['success' => true, 'message' => "Lead re-queued into active calling queue."]);
+}
+
+// Phase 4: Get DNC List
+if ($action === 'get_dnc_list') {
+    $dnc = $db->query("SELECT * FROM dnc_numbers ORDER BY id DESC")->fetchAll();
+    jsonOut(['success' => true, 'dnc_list' => $dnc]);
+}
+
+// Phase 4: Add Number to DNC
+if ($action === 'add_dnc_number') {
+    $phone = sanitizePhone($_POST['phone_number'] ?? '');
+    $reason = trim($_POST['reason'] ?? 'Customer opt-out');
+    if (empty($phone)) {
+        jsonOut(['success' => false, 'error' => 'Please provide a valid phone number.'], 400);
+    }
+    $stmt = $db->prepare("INSERT INTO dnc_numbers (phone_number, reason, added_by) VALUES (?, ?, ?) ON CONFLICT (phone_number) DO UPDATE SET reason = EXCLUDED.reason");
+    $stmt->execute([$phone, $reason, $_SESSION['username'] ?? 'Agent1']);
+
+    // Scrub existing pending leads
+    $scrubbed = $db->prepare("UPDATE leads SET status = 'dnc' WHERE phone_number = ? AND status = 'pending'");
+    $scrubbed->execute([$phone]);
+    $count = $scrubbed->rowCount();
+
+    jsonOut(['success' => true, 'message' => "Phone number {$phone} added to Do-Not-Call registry. Scrubbed {$count} active queue lead(s)."]);
+}
+
+// Phase 4: Remove Number from DNC
+if ($action === 'remove_dnc_number') {
+    $id = (int)($_POST['id'] ?? 0);
+    $db->prepare("DELETE FROM dnc_numbers WHERE id = ?")->execute([$id]);
+    jsonOut(['success' => true]);
+}
+
+// Phase 4: Scrub Entire Queue Against DNC
+if ($action === 'scrub_dnc_queue') {
+    $stmt = $db->query("UPDATE leads SET status = 'dnc' WHERE phone_number IN (SELECT phone_number FROM dnc_numbers) AND status = 'pending'");
+    $count = $stmt->rowCount();
+    jsonOut(['success' => true, 'scrubbed_count' => $count, 'message' => "DNC regulatory scrub completed. {$count} number(s) blocked from queue."]);
+}
+
+// 1. Get Campaign Dashboard Data (Supports Single or Multi-Campaign Selection)
+if ($action === 'get_campaign_data') {
+    $rawIds = $_GET['campaign_ids'] ?? $_GET['campaign_id'] ?? '1';
+    if ($rawIds === 'all') {
+        $allCamps = $db->query("SELECT id FROM campaigns ORDER BY id ASC")->fetchAll(PDO::FETCH_COLUMN);
+        $campaignIds = array_map('intval', $allCamps);
+    } elseif (is_array($rawIds)) {
+        $campaignIds = array_filter(array_map('intval', $rawIds));
+    } else {
+        $campaignIds = array_filter(array_map('intval', explode(',', (string)$rawIds)));
+    }
+
+    if (empty($campaignIds)) {
+        $campaignIds = [1];
+    }
+
+    $inPlaceholders = implode(',', array_fill(0, count($campaignIds), '?'));
+    $stmt = $db->prepare("SELECT * FROM campaigns WHERE id IN ($inPlaceholders) ORDER BY id ASC");
+    $stmt->execute($campaignIds);
+    $campaigns = $stmt->fetchAll();
+
+    if (empty($campaigns)) {
+        $stmtSingle = $db->query("SELECT * FROM campaigns ORDER BY id ASC LIMIT 1");
+        $fallback = $stmtSingle->fetch();
+        if ($fallback) {
+            $campaigns = [$fallback];
+            $campaignIds = [(int)$fallback['id']];
+        } else {
+            $db->exec("INSERT INTO campaigns (name, status) VALUES ('Outbound Customer Calls', 'idle')");
+            $newId = (int)$db->lastInsertId();
+            $stmtSingle = $db->prepare("SELECT * FROM campaigns WHERE id = ?");
+            $stmtSingle->execute([$newId]);
+            $campaigns = [$stmtSingle->fetch()];
+            $campaignIds = [$newId];
+        }
+        $inPlaceholders = '?';
+    }
+
+    if (count($campaigns) === 1) {
+        $campaign = $campaigns[0];
+    } else {
+        $names = array_column($campaigns, 'name');
+        $campaign = [
+            'id' => implode(',', array_column($campaigns, 'id')),
+            'name' => 'Combined (' . count($campaigns) . ' Campaigns)',
+            'status' => in_array('running', array_column($campaigns, 'status')) ? 'running' : 'idle',
+            'type' => 'multi',
+            'caller_id_number' => $campaigns[0]['caller_id_number'] ?? '+251911002233',
+            'ivr_audio_file' => $campaigns[0]['ivr_audio_file'] ?? 'assets/audio/welcome_human_voice.wav',
+            'ivr_audio_name' => 'Campaign-Specific Audio (Per Lead)',
+            'ivr_language' => $campaigns[0]['ivr_language'] ?? 'amharic',
+            'ivr_message_text' => $campaigns[0]['ivr_message_text'] ?? '',
+            'selected_campaign_ids' => array_column($campaigns, 'id'),
+            'campaigns' => $campaigns
+        ];
+    }
+
+    // Get Leads from all selected campaigns, with campaign name, IVR audio, caller ID
+    $stmtLeads = $db->prepare("
+        SELECT l.*, 
+               c.name AS campaign_name, 
+               c.ivr_audio_file, 
+               c.ivr_audio_name,
+               c.ivr_message_text, 
+               c.caller_id_number,
+               c.caller_id_name,
+               c.ivr_language
+        FROM leads l
+        JOIN campaigns c ON c.id = l.campaign_id
+        WHERE l.campaign_id IN ($inPlaceholders)
+        ORDER BY l.id ASC
+    ");
+    $stmtLeads->execute($campaignIds);
     $rawLeads = $stmtLeads->fetchAll();
 
     $today = date('Y-m-d');
@@ -138,9 +486,15 @@ if ($action === 'get_campaign_data') {
     // Get audio recordings
     $recordings = $db->query("SELECT * FROM audio_recordings ORDER BY id ASC")->fetchAll();
 
-    // Get recent call logs
-    $stmtLogs = $db->prepare("SELECT * FROM call_logs WHERE campaign_id = ? ORDER BY id DESC LIMIT 100");
-    $stmtLogs->execute([$campaignId]);
+    // Get recent call logs from selected campaigns
+    $stmtLogs = $db->prepare("
+        SELECT lg.*, c.name AS campaign_name 
+        FROM call_logs lg 
+        LEFT JOIN campaigns c ON c.id = lg.campaign_id 
+        WHERE lg.campaign_id IN ($inPlaceholders) 
+        ORDER BY lg.id DESC LIMIT 100
+    ");
+    $stmtLogs->execute($campaignIds);
     $rawLogs = $stmtLogs->fetchAll();
 
     $logs = [];
@@ -160,6 +514,8 @@ if ($action === 'get_campaign_data') {
         'available_dates' => $availableDates,
         'remaining_count' => $remainingCount,
         'campaign' => $campaign,
+        'selected_campaigns' => $campaigns,
+        'selected_campaign_ids' => $campaignIds,
         'leads' => $leads,
         'stats' => [
             'total' => $total,
@@ -302,13 +658,15 @@ if ($action === 'upload_leads') {
     $imported = 0;
     $invalid = 0;
 
-    $stmtInsert = $db->prepare("INSERT INTO leads (campaign_id, customer_name, phone_number, call_time, notes, status) VALUES (?, ?, ?, ?, ?, 'pending')");
+    $stmtInsert = $db->prepare("INSERT INTO leads (campaign_id, customer_name, phone_number, account_number, debt_amount, call_time, notes, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')");
 
     $isFirstLine = true;
     $phoneIdx = 1;
     $nameIdx = 0;
     $timeIdx = 2;
     $notesIdx = 3;
+    $accountIdx = -1;
+    $debtIdx = -1;
 
     foreach ($rows as $cols) {
         if (empty($cols) || !is_array($cols)) continue;
@@ -328,7 +686,13 @@ if ($action === 'upload_leads') {
                 } elseif (strpos($h, 'time') !== false || strpos($h, 'hour') !== false || strpos($h, 'schedule') !== false) {
                     $timeIdx = $idx;
                     $foundHeader = true;
-                } elseif (strpos($h, 'note') !== false || strpos($h, 'tag') !== false || strpos($h, 'account') !== false) {
+                } elseif (strpos($h, 'account') !== false || strpos($h, 'acc') !== false) {
+                    $accountIdx = $idx;
+                    $foundHeader = true;
+                } elseif (strpos($h, 'debt') !== false || strpos($h, 'amount') !== false || strpos($h, 'balance') !== false || strpos($h, 'etb') !== false) {
+                    $debtIdx = $idx;
+                    $foundHeader = true;
+                } elseif (strpos($h, 'note') !== false || strpos($h, 'tag') !== false) {
                     $notesIdx = $idx;
                     $foundHeader = true;
                 }
@@ -368,10 +732,16 @@ if ($action === 'upload_leads') {
         $callTime = trim($cols[$timeIdx] ?? 'Immediate');
         if (empty($callTime) || $timeIdx === $usedPhoneIdx) $callTime = 'Immediate';
         $notes = trim($cols[$notesIdx] ?? 'Imported');
+        $account = ($accountIdx >= 0 && isset($cols[$accountIdx])) ? trim($cols[$accountIdx]) : '';
+        $debt = ($debtIdx >= 0 && isset($cols[$debtIdx])) ? floatval(preg_replace('/[^\d.]/', '', $cols[$debtIdx])) : 0.00;
 
-        $stmtInsert->execute([$campaignId, $name, $phone, $callTime, $notes]);
+        $stmtInsert->execute([$campaignId, $name, $phone, $account, $debt, $callTime, $notes]);
         $imported++;
     }
+
+    // Auto-scrub newly imported leads against DNC registry
+    $db->prepare("UPDATE leads SET status = 'dnc' WHERE campaign_id = ? AND phone_number IN (SELECT phone_number FROM dnc_numbers) AND status = 'pending'")
+       ->execute([$campaignId]);
 
     $db->prepare("UPDATE campaigns SET total_leads = (SELECT COUNT(*) FROM leads WHERE campaign_id = ?) WHERE id = ?")
        ->execute([$campaignId, $campaignId]);
@@ -405,23 +775,36 @@ if ($action === 'save_manual_leads') {
     $invalid = 0;
 
     $stmtCheck = $db->prepare("SELECT id FROM leads WHERE campaign_id = ? AND phone_number = ?");
-    $stmtInsert = $db->prepare("INSERT INTO leads (campaign_id, customer_name, phone_number, call_time, notes, status) VALUES (?, ?, ?, ?, ?, 'pending')");
+    $stmtInsert = $db->prepare("INSERT INTO leads (campaign_id, customer_name, phone_number, account_number, debt_amount, call_time, notes, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')");
 
     foreach ($lines as $line) {
         $line = trim($line);
         if (empty($line)) continue;
 
         $parts = array_map('trim', explode(',', $line));
-        $phone = sanitizePhone($parts[0] ?? '');
+        
+        // Handle: Phone, or Name, Phone, or Name, Phone, Account, Debt
+        $candidate0 = sanitizePhone($parts[0] ?? '');
+        $candidate1 = isset($parts[1]) ? sanitizePhone($parts[1]) : '';
 
-        if (empty($phone) || strlen($phone) < 6) {
+        if (!empty($candidate0) && strlen($candidate0) >= 8 && empty($candidate1)) {
+            $phone = $candidate0;
+            $name = 'Customer (' . substr($phone, -4) . ')';
+            $account = $parts[1] ?? '';
+            $debt = isset($parts[2]) ? floatval($parts[2]) : 0.00;
+            $callTime = 'Immediate';
+            $notes = 'Manual Entry';
+        } elseif (!empty($candidate1) && strlen($candidate1) >= 8) {
+            $name = $parts[0];
+            $phone = $candidate1;
+            $account = $parts[2] ?? '';
+            $debt = isset($parts[3]) ? floatval($parts[3]) : 0.00;
+            $callTime = $parts[4] ?? 'Immediate';
+            $notes = 'Manual Entry';
+        } else {
             $invalid++;
             continue;
         }
-
-        $name = !empty($parts[1]) ? $parts[1] : 'Customer (' . substr($phone, -4) . ')';
-        $callTime = !empty($parts[2]) ? $parts[2] : date('h:i A');
-        $notes = !empty($parts[3]) ? $parts[3] : 'Manual Entry';
 
         $stmtCheck->execute([$campaignId, $phone]);
         if ($stmtCheck->fetch()) {
@@ -429,9 +812,13 @@ if ($action === 'save_manual_leads') {
             continue;
         }
 
-        $stmtInsert->execute([$campaignId, $name, $phone, $callTime, $notes]);
+        $stmtInsert->execute([$campaignId, $name, $phone, $account, $debt, $callTime, $notes]);
         $imported++;
     }
+
+    // Auto-scrub newly added manual leads against DNC registry
+    $db->prepare("UPDATE leads SET status = 'dnc' WHERE campaign_id = ? AND phone_number IN (SELECT phone_number FROM dnc_numbers) AND status = 'pending'")
+       ->execute([$campaignId]);
 
     $db->prepare("UPDATE campaigns SET total_leads = (SELECT COUNT(*) FROM leads WHERE campaign_id = ?) WHERE id = ?")
        ->execute([$campaignId, $campaignId]);
@@ -441,7 +828,7 @@ if ($action === 'save_manual_leads') {
         'imported' => $imported,
         'duplicates' => $duplicates,
         'invalid' => $invalid,
-        'message' => "Successfully added {$imported} leads."
+        'message' => "Successfully added {$imported} leads to PostgreSQL."
     ]);
 }
 
@@ -450,6 +837,8 @@ if ($action === 'add_single_lead') {
     $campaignId = (int)($_POST['campaign_id'] ?? 1);
     $name = trim($_POST['customer_name'] ?? '');
     $rawPhone = trim($_POST['phone_number'] ?? '');
+    $account = trim($_POST['account_number'] ?? '');
+    $debt = floatval($_POST['debt_amount'] ?? 0.00);
     $callTime = trim($_POST['call_time'] ?? 'Immediate');
     $notes = trim($_POST['notes'] ?? 'Quick Add');
 
@@ -461,8 +850,13 @@ if ($action === 'add_single_lead') {
         $name = 'Customer (' . substr($phone, -4) . ')';
     }
 
-    $stmtInsert = $db->prepare("INSERT INTO leads (campaign_id, customer_name, phone_number, call_time, notes, status) VALUES (?, ?, ?, ?, ?, 'pending')");
-    $stmtInsert->execute([$campaignId, $name, $phone, $callTime, $notes]);
+    // Check if number is in DNC registry
+    $dncCheck = $db->prepare("SELECT id FROM dnc_numbers WHERE phone_number = ?");
+    $dncCheck->execute([$phone]);
+    $leadStatus = $dncCheck->fetch() ? 'dnc' : 'pending';
+
+    $stmtInsert = $db->prepare("INSERT INTO leads (campaign_id, customer_name, phone_number, account_number, debt_amount, call_time, notes, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+    $stmtInsert->execute([$campaignId, $name, $phone, $account, $debt, $callTime, $notes, $leadStatus]);
     $newId = (int)$db->lastInsertId();
 
     $db->prepare("UPDATE campaigns SET total_leads = (SELECT COUNT(*) FROM leads WHERE campaign_id = ?) WHERE id = ?")
@@ -477,6 +871,37 @@ if ($action === 'add_single_lead') {
         'message' => "Contact {$name} ({$phone}) added successfully!",
         'lead' => $newLead
     ]);
+}
+
+// 3c. Export Contacts Directory to CSV
+if ($action === 'export_contacts_csv') {
+    $campaignId = (int)($_GET['campaign_id'] ?? 1);
+    $stmt = $db->prepare("SELECT id, customer_name, phone_number, account_number, debt_amount, currency, call_time, status, duration_sec, notes FROM leads WHERE campaign_id = ? ORDER BY id ASC");
+    $stmt->execute([$campaignId]);
+    $records = $stmt->fetchAll();
+
+    header('Content-Type: text/csv; charset=utf-8');
+    header('Content-Disposition: attachment; filename=contacts_directory_' . date('Y-m-d_His') . '.csv');
+
+    $out = fopen('php://output', 'w');
+    fputcsv($out, ['ID', 'Customer Name', 'Phone Number', 'Account Number', 'Debt Amount (ETB)', 'Currency', 'Scheduled Call Time', 'Status', 'Duration (s)', 'Notes'], ',', '"', "\\");
+
+    foreach ($records as $r) {
+        fputcsv($out, [
+            $r['id'],
+            $r['customer_name'],
+            $r['phone_number'],
+            $r['account_number'],
+            $r['debt_amount'],
+            $r['currency'] ?? 'ETB',
+            $r['call_time'],
+            $r['status'],
+            $r['duration_sec'],
+            $r['notes']
+        ], ',', '"', "\\");
+    }
+    fclose($out);
+    exit;
 }
 
 // 4. Update Lead Status & Call Event
@@ -670,7 +1095,7 @@ if ($action === 'export_logs_csv') {
     header('Content-Disposition: attachment; filename=skykin_dialer_logs_' . date('Y-m-d_His') . '.csv');
 
     $out = fopen('php://output', 'w');
-    fputcsv($out, ['Log ID', 'Customer Name', 'Phone Number', 'Scheduled Call Time', 'Agent Extension', 'Status', 'Duration (s)', 'IVR Audio Played', 'Timestamp']);
+    fputcsv($out, ['Log ID', 'Customer Name', 'Phone Number', 'Scheduled Call Time', 'Agent Extension', 'Status', 'Duration (s)', 'IVR Audio Played', 'Timestamp'], ',', '"', "\\");
 
     foreach ($records as $r) {
         fputcsv($out, [
@@ -683,7 +1108,7 @@ if ($action === 'export_logs_csv') {
             $r['duration_sec'],
             $r['audio_played'],
             $r['timestamp']
-        ]);
+        ], ',', '"', "\\");
     }
     fclose($out);
     exit;
@@ -895,6 +1320,197 @@ if ($action === 'change_password') {
     jsonOut([
         'success' => true,
         'message' => 'Password updated successfully!'
+    ]);
+}
+
+// 16. Mock Volume & Trunk Capacity Test (100% Safe Simulation)
+if ($action === 'run_mock_volume_test') {
+    ini_set('memory_limit', '512M');
+    set_time_limit(120);
+
+    $targetCalls = isset($_REQUEST['calls']) ? max(10, min(5000, (int)$_REQUEST['calls'])) : 1000;
+    $isFast = !empty($_REQUEST['fast']) || !isset($_REQUEST['regulated']);
+
+    // Find or create mock benchmark campaign
+    $stmt = $db->prepare("SELECT id FROM campaigns WHERE name = 'Benchmark: 1000 CPM Mock Volume Test' LIMIT 1");
+    $stmt->execute();
+    $campaignId = (int)$stmt->fetchColumn();
+
+    if (!$campaignId) {
+        $insertCamp = $db->prepare("
+            INSERT INTO campaigns (name, type, status, caller_id_name, caller_id_number, ivr_language, ivr_message_text, total_leads, completed_leads)
+            VALUES ('Benchmark: 1000 CPM Mock Volume Test', 'predictive', 'running', 'Ethio Telecom Mock Trunk', '+251911002233', 'amharic', 'ይህ የሙከራ ጥሪ ነው:: (Mock Test Call)', 0, 0)
+            RETURNING id
+        ");
+        $insertCamp->execute();
+        $campaignId = (int)$insertCamp->fetchColumn();
+    }
+
+    // Clean previous pending mock leads
+    $db->prepare("DELETE FROM leads WHERE campaign_id = ? AND status = 'pending'")->execute([$campaignId]);
+
+    // Provision mock leads with safe non-routable numbers (+251900XXXXXX)
+    $firstNames = ['Abebe', 'Almaz', 'Dawit', 'Helen', 'Kebede', 'Marta', 'Samuel', 'Selam', 'Tewodros', 'Yonas'];
+    $lastNames = ['Bikila', 'Tesfaye', 'Tadesse', 'Alemu', 'Haile', 'Bekele', 'Worku', 'Desta', 'Girma', 'Mengistu'];
+
+    $db->beginTransaction();
+    $batchSize = 250;
+    $inserted = 0;
+    $insertSql = "INSERT INTO leads (campaign_id, customer_name, phone_number, account_number, debt_amount, currency, language, call_time, priority, status) VALUES ";
+
+    while ($inserted < $targetCalls) {
+        $currentBatch = min($batchSize, $targetCalls - $inserted);
+        $values = [];
+        $params = [];
+        for ($i = 0; $i < $currentBatch; $i++) {
+            $idx = $inserted + $i + 1;
+            $name = 'Mock - ' . $firstNames[array_rand($firstNames)] . ' ' . $lastNames[array_rand($lastNames)];
+            $phone = '+251900' . str_pad((string)$idx, 6, '0', STR_PAD_LEFT);
+            $acct = 'MOCK-ACC-' . str_pad((string)$idx, 6, '0', STR_PAD_LEFT);
+            $debt = (float)mt_rand(150, 2500);
+            $values[] = "(?, ?, ?, ?, ?, 'ETB', 'amharic', 'Immediate', 1, 'pending')";
+            array_push($params, $campaignId, $name, $phone, $acct, $debt);
+        }
+        $db->prepare($insertSql . implode(', ', $values))->execute($params);
+        $inserted += $currentBatch;
+    }
+    $db->commit();
+
+    // Process mock calls
+    $fetchStmt = $db->prepare("SELECT id, customer_name, phone_number, account_number, debt_amount FROM leads WHERE campaign_id = ? AND status = 'pending' ORDER BY id ASC LIMIT ?");
+    $fetchStmt->execute([$campaignId, $targetCalls]);
+    $leadsToDial = $fetchStmt->fetchAll(PDO::FETCH_ASSOC);
+
+    $updateLeadStmt = $db->prepare("UPDATE leads SET status = ?, duration_sec = ?, last_attempt_at = CURRENT_TIMESTAMP, notes = ? WHERE id = ?");
+    $insertLogStmt = $db->prepare("INSERT INTO call_logs (lead_id, campaign_id, customer_name, phone_number, agent_extension, status, duration_sec, audio_played, cost_etb, timestamp) VALUES (?, ?, ?, ?, 'MockTrunk-Ch', ?, ?, 'assets/audio/welcome_human_voice.wav', ?, CURRENT_TIMESTAMP)");
+
+    $startTime = microtime(true);
+    $outcomes = ['answered' => 0, 'busy' => 0, 'no_answer' => 0, 'failed' => 0];
+
+    foreach ($leadsToDial as $lead) {
+        $roll = mt_rand(1, 100);
+        if ($roll <= 65) {
+            $status = 'answered'; $duration = mt_rand(12, 45); $logStatus = 'ANSWERED'; $cost = round($duration * 0.05, 2);
+            $notes = '[MOCK TEST] IVR audio played. Customer listened to balance.';
+            $outcomes['answered']++;
+        } elseif ($roll <= 80) {
+            $status = 'busy'; $duration = 0; $logStatus = 'BUSY'; $cost = 0.00;
+            $notes = '[MOCK TEST] SIP 486 Busy Here simulated.';
+            $outcomes['busy']++;
+        } elseif ($roll <= 95) {
+            $status = 'no_answer'; $duration = 0; $logStatus = 'NO_ANSWER'; $cost = 0.00;
+            $notes = '[MOCK TEST] Ringing timeout after 30s (SIP 480).';
+            $outcomes['no_answer']++;
+        } else {
+            $status = 'failed'; $duration = 0; $logStatus = 'FAILED'; $cost = 0.00;
+            $notes = '[MOCK TEST] Subscriber unallocated / DNC.';
+            $outcomes['failed']++;
+        }
+
+        $updateLeadStmt->execute([$status, $duration, $notes, $lead['id']]);
+        $insertLogStmt->execute([$lead['id'], $campaignId, $lead['customer_name'], $lead['phone_number'], $logStatus, $duration, $cost]);
+    }
+
+    $totalTime = microtime(true) - $startTime;
+    $finalCaps = round($targetCalls / max(0.001, $totalTime), 2);
+    $finalCpm = round(($targetCalls / max(0.001, $totalTime)) * 60);
+
+    // Update campaign counter
+    $db->prepare("UPDATE campaigns SET total_leads = (SELECT count(*) FROM leads WHERE campaign_id = ?), completed_leads = (SELECT count(*) FROM leads WHERE campaign_id = ? AND status != 'pending') WHERE id = ?")
+        ->execute([$campaignId, $campaignId, $campaignId]);
+
+    jsonOut([
+        'success' => true,
+        'message' => "Successfully simulated {$targetCalls} mock calls through the complete pipeline!",
+        'campaign_id' => $campaignId,
+        'calls_dispatched' => $targetCalls,
+        'execution_time_sec' => round($totalTime, 3),
+        'sustained_caps' => $finalCaps,
+        'calculated_cpm' => $finalCpm,
+        'outcomes' => $outcomes,
+        'db_latency_ms' => round(($totalTime / max(1, $targetCalls)) * 1000, 2),
+        'safety_mode' => '100% Mock - Zero real phone calls placed'
+    ]);
+}
+
+// 17. Live Paced Mock Batch Dispatch (dispatches 17 calls per second in real time)
+if ($action === 'dispatch_mock_batch') {
+    $batchSize = isset($_REQUEST['size']) ? max(1, min(100, (int)$_REQUEST['size'])) : 17;
+    $targetCalls = isset($_REQUEST['total_target']) ? (int)$_REQUEST['total_target'] : 1000;
+    $isFirst = !empty($_REQUEST['reset_first']);
+
+    $stmt = $db->prepare("SELECT id FROM campaigns WHERE name = 'Benchmark: 1000 CPM Mock Volume Test' LIMIT 1");
+    $stmt->execute();
+    $campaignId = (int)$stmt->fetchColumn();
+
+    if (!$campaignId) {
+        $insertCamp = $db->prepare("
+            INSERT INTO campaigns (name, type, status, caller_id_name, caller_id_number, ivr_language, ivr_message_text, total_leads, completed_leads)
+            VALUES ('Benchmark: 1000 CPM Mock Volume Test', 'predictive', 'running', 'Ethio Telecom Mock Trunk', '+251911002233', 'amharic', 'ይህ የሙከራ ጥሪ ነው:: (Mock Test Call)', ?, 0)
+            RETURNING id
+        ");
+        $insertCamp->execute([$targetCalls]);
+        $campaignId = (int)$insertCamp->fetchColumn();
+    }
+
+    if ($isFirst) {
+        $db->prepare("DELETE FROM leads WHERE campaign_id = ?")->execute([$campaignId]);
+        $db->prepare("UPDATE campaigns SET total_leads = ?, completed_leads = 0 WHERE id = ?")->execute([$targetCalls, $campaignId]);
+    }
+
+    $firstNames = ['Abebe', 'Almaz', 'Dawit', 'Helen', 'Kebede', 'Marta', 'Samuel', 'Selam', 'Tewodros', 'Yonas'];
+    $lastNames = ['Bikila', 'Tesfaye', 'Tadesse', 'Alemu', 'Haile', 'Bekele', 'Worku', 'Desta', 'Girma', 'Mengistu'];
+
+    $currentCount = (int)$db->query("SELECT count(*) FROM leads WHERE campaign_id = {$campaignId}")->fetchColumn();
+    $startIdx = $currentCount + 1;
+
+    $outcomes = ['answered' => 0, 'busy' => 0, 'no_answer' => 0, 'failed' => 0];
+
+    $db->beginTransaction();
+    $insertLeadStmt = $db->prepare("INSERT INTO leads (campaign_id, customer_name, phone_number, account_number, debt_amount, currency, language, call_time, priority, status, duration_sec, notes, last_attempt_at) VALUES (?, ?, ?, ?, ?, 'ETB', 'amharic', 'Immediate', 1, ?, ?, ?, CURRENT_TIMESTAMP) RETURNING id");
+    $insertLogStmt = $db->prepare("INSERT INTO call_logs (lead_id, campaign_id, customer_name, phone_number, agent_extension, status, duration_sec, audio_played, cost_etb, timestamp) VALUES (?, ?, ?, ?, 'MockTrunk-Ch', ?, ?, 'assets/audio/welcome_human_voice.wav', ?, CURRENT_TIMESTAMP)");
+
+    for ($i = 0; $i < $batchSize; $i++) {
+        $idx = $startIdx + $i;
+        $name = 'Mock - ' . $firstNames[array_rand($firstNames)] . ' ' . $lastNames[array_rand($lastNames)];
+        $phone = '+251900' . str_pad((string)$idx, 6, '0', STR_PAD_LEFT);
+        $acct = 'MOCK-ACC-' . str_pad((string)$idx, 6, '0', STR_PAD_LEFT);
+        $debt = (float)mt_rand(150, 2500);
+
+        $roll = mt_rand(1, 100);
+        if ($roll <= 65) {
+            $status = 'answered'; $duration = mt_rand(12, 45); $logStatus = 'ANSWERED'; $cost = round($duration * 0.05, 2);
+            $notes = '[MOCK TEST] IVR audio played. Customer listened to balance.';
+            $outcomes['answered']++;
+        } elseif ($roll <= 80) {
+            $status = 'busy'; $duration = 0; $logStatus = 'BUSY'; $cost = 0.00;
+            $notes = '[MOCK TEST] SIP 486 Busy Here simulated.';
+            $outcomes['busy']++;
+        } elseif ($roll <= 95) {
+            $status = 'no_answer'; $duration = 0; $logStatus = 'NO_ANSWER'; $cost = 0.00;
+            $notes = '[MOCK TEST] Ringing timeout after 30s (SIP 480).';
+            $outcomes['no_answer']++;
+        } else {
+            $status = 'failed'; $duration = 0; $logStatus = 'FAILED'; $cost = 0.00;
+            $notes = '[MOCK TEST] Subscriber unallocated / DNC.';
+            $outcomes['failed']++;
+        }
+
+        $insertLeadStmt->execute([$campaignId, $name, $phone, $acct, $debt, $status, $duration, $notes]);
+        $leadId = (int)$insertLeadStmt->fetchColumn();
+        $insertLogStmt->execute([$leadId, $campaignId, $name, $phone, $logStatus, $duration, $cost]);
+    }
+
+    $db->prepare("UPDATE campaigns SET completed_leads = (SELECT count(*) FROM leads WHERE campaign_id = ?) WHERE id = ?")->execute([$campaignId, $campaignId]);
+    $db->commit();
+
+    $totalDispatched = $startIdx + $batchSize - 1;
+    jsonOut([
+        'success' => true,
+        'batch_dispatched' => $batchSize,
+        'total_dispatched' => $totalDispatched,
+        'batch_outcomes' => $outcomes,
+        'campaign_id' => $campaignId
     ]);
 }
 
