@@ -79,46 +79,19 @@ $initials      = strtoupper(substr($currentUser['username'] ?? 'A', 0, 2));
       </div>
     </div>
 
-    <!-- Agent & SIP Extension Status Block -->
-    <div class="sidebar-agent-card">
-      <div class="sidebar-agent-top">
-        <div class="sidebar-agent-avatar"><?php echo $initials; ?></div>
-        <div class="sidebar-agent-meta">
-          <div class="sidebar-agent-name"><?php echo $agent_name; ?></div>
-          <div class="sidebar-agent-ext" onclick="openSipSettingsModal()" title="SIP Extension Settings (Click to configure)">
-            <span class="sip-dot" id="headerSipDot"></span>
-            <span id="headerSipStatusText">Ext: <?php echo $agent_ext; ?> (Standby)</span>
-          </div>
-        </div>
-      </div>
-      
-      <!-- Status Dropdown & Live Clock -->
-      <div class="sidebar-status-row">
-        <div class="status-drop-wrap" style="flex:1;">
-          <button class="status-drop-btn" id="statusDropBtn" onclick="toggleStatusMenu()" aria-label="Status menu" style="width:100%;justify-content:space-between;padding:4px 8px;font-size:11px;">
-            <span style="display:flex;align-items:center;gap:5px;">
-              <span class="sdot ready" id="statusDot"></span>
-              <span id="statusLabel">Ready</span>
-            </span>
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.75;"><polyline points="6 9 12 15 18 9"></polyline></svg>
-          </button>
-          <div class="status-drop-menu" id="statusDropMenu" style="left:0;right:auto;bottom:auto;top:100%;">
-            <div class="s-opt" onclick="setAgentStatus('ready')"><span class="opt-dot" style="background:#00A651"></span> Available / Ready</div>
-            <div class="s-opt" onclick="setAgentStatus('idle')"><span class="opt-dot" style="background:#64748b"></span> Idle</div>
-            <div class="s-opt" onclick="setAgentStatus('break')"><span class="opt-dot" style="background:#0082C8"></span> On Break</div>
-            <div class="s-opt" onclick="openSipSettingsModal()"><span class="opt-dot" style="background:#1a3d2a"></span> SIP Settings</div>
-            <div class="s-opt" onclick="openChangePasswordModal()"><span class="opt-dot" style="background:#84C341"></span> Change Password</div>
-            <div class="s-opt logout" onclick="window.location.href='logout.php'"><span class="opt-dot" style="background:#ef4444"></span> Sign Out</div>
-          </div>
-        </div>
-        <div class="header-clock" id="liveClock" style="font-size:11px;padding:3px 7px;border-radius:6px;background:rgba(0,166,81,0.08);color:#15803d;font-family:monospace;font-weight:700;"></div>
-      </div>
+    <!-- Hidden compatibility elements to prevent JS errors -->
+    <div style="display:none;">
+      <span class="sip-dot" id="headerSipDot"></span>
+      <span id="headerSipStatusText">Ext: <?php echo $agent_ext; ?> (Standby)</span>
+      <button id="statusDropBtn" onclick="toggleStatusMenu()"></button>
+      <span class="sdot ready" id="statusDot"></span>
+      <span id="statusLabel">Ready</span>
+      <div id="statusDropMenu"></div>
+      <div id="liveClock"></div>
+      <button id="sidebarToggleBtn"></button>
+      <span id="headerSectionTitle"></span>
+      <span id="topUrlText"></span>
     </div>
-
-    <!-- Hidden compatibility elements -->
-    <button id="sidebarToggleBtn" style="display:none;"></button>
-    <span id="headerSectionTitle" style="display:none;"></span>
-    <span id="topUrlText" style="display:none;"></span>
 
     <div class="sc-nav-list" style="padding:10px 0;">
       

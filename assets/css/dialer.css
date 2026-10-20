@@ -301,14 +301,14 @@ body {
 
 /* LEFT SIDEBAR WITH TOP LOGO */
 #sidebarMenu, .sc-sidebar {
-  position: fixed; top: 0 !important; left: 0; bottom: 0; width: 215px !important;
+  position: fixed; top: 0 !important; left: 0; bottom: 0; width: 220px !important;
   background: var(--sb-bg); border-right: 1px solid var(--sc-green-border);
   box-shadow: 2px 0 8px rgba(26,61,42,0.05);
   display: flex; flex-direction: column; z-index: 200;
   transition: transform 0.28s cubic-bezier(0.4,0,0.2,1);
   overflow-y: auto;
 }
-#sidebarMenu.collapsed, .sc-sidebar.collapsed { transform: translateX(-215px); }
+#sidebarMenu.collapsed, .sc-sidebar.collapsed { transform: translateX(-220px); }
 
 /* Top Sidebar Brand Logo & Identity */
 .sidebar-brand-header {
@@ -356,66 +356,6 @@ body {
   letter-spacing: 0.5px;
 }
 
-/* Sidebar Agent & Status Card */
-.sidebar-agent-card {
-  padding: 11px 12px;
-  background: #ffffff;
-  border-bottom: 1px solid #d8ebd9;
-  flex-shrink: 0;
-}
-.sidebar-agent-top {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-}
-.sidebar-agent-avatar {
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
-  background: linear-gradient(135deg, #00A651 0%, #15803d 100%);
-  color: #ffffff;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-weight: 700;
-  font-size: 11.5px;
-  flex-shrink: 0;
-  box-shadow: 0 1px 3px rgba(0, 166, 81, 0.25);
-}
-.sidebar-agent-meta {
-  min-width: 0;
-  flex: 1;
-}
-.sidebar-agent-name {
-  font-size: 12px;
-  font-weight: 700;
-  color: #0f172a;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  line-height: 1.2;
-}
-.sidebar-agent-ext {
-  font-size: 10.5px;
-  color: #475569;
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  margin-top: 2px;
-  cursor: pointer;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.sidebar-agent-ext:hover {
-  color: #00A651;
-}
-.sidebar-status-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-top: 7px;
-}
 
 .sb-nav { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 10px 8px; }
 .sb-section-label {
@@ -444,7 +384,7 @@ body {
 
 /* MAIN LAYOUT */
 .main, .sc-main-content {
-  margin-top: 0 !important; margin-left: 215px !important; padding: 22px;
+  margin-top: 0 !important; margin-left: 220px !important; padding: 22px;
   min-height: 100vh;
   transition: margin-left 0.28s cubic-bezier(0.4,0,0.2,1);
   background: var(--page-bg);
@@ -452,7 +392,7 @@ body {
 .main.sidebar-collapsed, .sc-main-content.sidebar-collapsed { margin-left: 0 !important; }
 @media (max-width: 768px) {
   .main, .sc-main-content { margin-left: 0 !important; }
-  #sidebarMenu, .sc-sidebar { transform: translateX(-215px); }
+  #sidebarMenu, .sc-sidebar { transform: translateX(-220px); }
   #sidebarMenu.open-mobile, .sc-sidebar.open-mobile { transform: translateX(0); }
 }
 
@@ -756,8 +696,8 @@ body {
 
 /* SOFTPHONE */
 .phone-popup {
-  position: fixed; top: 58px; right: -340px; z-index: 601;
-  width: 296px; max-height: calc(100vh - 58px);
+  position: fixed; top: 0 !important; right: -340px; z-index: 601;
+  width: 296px; max-height: 100vh !important;
   background: #ffffff; border-left: 1px solid var(--border);
   box-shadow: -4px 0 22px rgba(26,61,42,0.15);
   display: flex; flex-direction: column; overflow-y: auto; overflow-x: hidden;
@@ -958,11 +898,11 @@ body.phone-open .main { margin-right: 296px; transition: margin-right 0.3s ease;
 
 /* SkyConnect Main Body */
 .sc-main-content {
-  margin-top: 60px;
+  margin-top: 0 !important;
   margin-left: 200px;
   padding: 22px;
   background: #fbfdfc;
-  min-height: calc(100vh - 60px);
+  min-height: 100vh !important;
   transition: margin-left 0.25s ease;
 }
 .sc-main-content.sidebar-collapsed { margin-left: 0; }
@@ -1305,7 +1245,7 @@ body.phone-open .main { margin-right: 296px; transition: margin-right 0.3s ease;
 
 #sidebarMenu, .sc-sidebar {
   position: fixed !important;
-  top: 60px !important;
+  top: 0 !important;
   left: 0 !important;
   bottom: 0 !important;
   width: 220px !important;
@@ -1321,11 +1261,11 @@ body.phone-open .main { margin-right: 296px; transition: margin-right 0.3s ease;
   transform: translateX(-220px) !important;
 }
 .main, .sc-main-content {
-  margin-top: 60px !important;
+  margin-top: 0 !important;
   margin-left: 220px !important;
   padding: 26px 32px !important;
   background: #f8fafc !important;
-  min-height: calc(100vh - 60px) !important;
+  min-height: 100vh !important;
   transition: margin-left 0.25s ease !important;
 }
 .main.sidebar-collapsed, .sc-main-content.sidebar-collapsed {
