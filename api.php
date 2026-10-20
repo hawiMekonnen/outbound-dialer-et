@@ -783,30 +783,40 @@ if ($action === 'save_manual_leads') {
 
         $parts = array_map('trim', explode(',', $line));
         
-        // Handle: Phone, or Name, Phone, or Name, Phone, Account, Debt
+        // Handle: Phone only, or Name, Phone, or Name, Phone, Schedule
         $candidate0 = sanitizePhone($parts[0] ?? '');
         $candidate1 = isset($parts[1]) ? sanitizePhone($parts[1]) : '';
+
+        $account = '';
+        $debt = 0.00;
+        $callTime = 'Immediate';
+        $notes = 'Manual Entry';
 
         if (!empty($candidate0) && strlen($candidate0) >= 8 && empty($candidate1)) {
             $phone = $candidate0;
             $name = 'Customer (' . substr($phone, -4) . ')';
-            $account = $parts[1] ?? '';
-            $debt = isset($parts[2]) ? floatval($parts[2]) : 0.00;
-            $callTime = 'Immediate';
-            $notes = 'Manual Entry';
+            if (isset($parts[1]) && !empty(trim($parts[1]))) {
+                $callTime = trim($parts[1]);
+            }
         } elseif (!empty($candidate1) && strlen($candidate1) >= 8) {
             $name = $parts[0];
             $phone = $candidate1;
-            $account = $parts[2] ?? '';
-            $debt = isset($parts[3]) ? floatval($parts[3]) : 0.00;
-            $callTime = $parts[4] ?? 'Immediate';
-            $notes = 'Manual Entry';
+            if (count($parts) === 3) {
+                // Name, Phone, Schedule
+                $callTime = trim($parts[2]);
+            } elseif (count($parts) >= 4) {
+                // Legacy: Name, Phone, Account, Debt, Schedule
+                $account = $parts[2] ?? '';
+                $debt = isset($parts[3]) ? floatval($parts[3]) : 0.00;
+                $callTime = !empty($parts[4]) ? trim($parts[4]) : 'Immediate';
+            }
         } else {
             $invalid++;
             continue;
         }
 
-        $stmtCheck->execute([$campaignId, $phone]);
+        $stmtCheck = $db->prepare("SELECT id FROM leads WHERE campaign_id = ? AND phone_number = ? AND call_time = ? AND status = 'pending'");
+        $stmtCheck->execute([$campaignId, $phone, $callTime]);
         if ($stmtCheck->fetch()) {
             $duplicates++;
             continue;

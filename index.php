@@ -66,84 +66,60 @@ $initials      = strtoupper(substr($currentUser['username'] ?? 'A', 0, 2));
 </head>
 <body>
 
-  <!-- ── Top Enterprise Header (SkyConnect / Ethio Telecom) ── -->
-  <header class="header" style="background: linear-gradient(90deg, #1f6b39 0%, #267941 50%, #1f6b39 100%) !important; border: none !important; border-bottom: none !important; box-shadow: none !important;">
-    <!-- Left: Sidebar Toggle + Brand Identity -->
-    <div class="header-left">
-      <button class="header-toggle-btn" id="sidebarToggleBtn" onclick="toggleSidebarMenu()" title="Toggle Sidebar">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-          <line x1="3" y1="12" x2="21" y2="12"></line>
-          <line x1="3" y1="6" x2="21" y2="6"></line>
-          <line x1="3" y1="18" x2="21" y2="18"></line>
-        </svg>
-      </button>
-
-      <div class="header-brand-wrap" onclick="switchNav('tabCampaigns', 'campaigns')">
-        <div class="header-brand-logo-card">
-          <img src="assets/images/skyservice_logo.png" alt="SkyService Logo" class="header-brand-img">
-        </div>
-        <div class="header-brand-titles">
-          <span class="header-app-title">SkyConnect</span>
-          <span class="header-app-badge">Ethio Telecom</span>
-        </div>
-      </div>
-    </div>
-
-    <!-- Center: Contextual Section Title & Real-Time FreeSWITCH Engine Status -->
-    <div class="header-center">
-      <div class="header-section-indicator">
-        <span class="header-section-dot"></span>
-        <span class="header-section-name" id="headerSectionTitle">Campaigns Management</span>
-      </div>
-      <!-- Hidden element to preserve backwards compatibility with topUrlText -->
-      <span id="topUrlText" style="display:none;">skyconnect.ethiotelecom.et/campaigns</span>
-    </div>
-
-    <!-- Right: Softphone SIP Pill + Clock + Agent + Status Menu -->
-    <div class="header-right">
-      <!-- SIP Softphone Status Pill -->
-      <div class="header-sip-pill" onclick="openSipSettingsModal()" title="SIP Extension Configuration (Click to configure)">
-        <div class="sip-dot" id="headerSipDot"></div>
-        <span id="headerSipStatusText">Ext: <?php echo $agent_ext; ?> (Standby)</span>
-        <svg class="header-sip-cog" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="12" cy="12" r="3"></circle>
-          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
-        </svg>
-      </div>
-
-      <!-- Live Clock -->
-      <div class="header-clock" id="liveClock"></div>
-
-      <!-- Agent Profile Pill -->
-      <div class="header-agent-pill">
-        <div class="agent-avatar"><?php echo $initials; ?></div>
-        <div class="agent-text-info">
-          <span class="agent-name"><?php echo $agent_name; ?></span>
-          <span class="agent-domain"><?php echo $domain; ?></span>
-        </div>
-      </div>
-
-      <!-- Ready / Status Dropdown -->
-      <div class="status-drop-wrap">
-        <button class="status-drop-btn" id="statusDropBtn" onclick="toggleStatusMenu()" aria-label="Status menu">
-          <span class="sdot ready" id="statusDot"></span>
-          <span id="statusLabel">Ready</span>
-          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.75;margin-left:2px;"><polyline points="6 9 12 15 18 9"></polyline></svg>
-        </button>
-        <div class="status-drop-menu" id="statusDropMenu">
-          <div class="s-opt" onclick="setAgentStatus('ready')"><span class="opt-dot" style="background:#00A651"></span> Available / Ready</div>
-          <div class="s-opt" onclick="setAgentStatus('idle')"><span class="opt-dot" style="background:#64748b"></span> Idle</div>
-          <div class="s-opt" onclick="setAgentStatus('break')"><span class="opt-dot" style="background:#0082C8"></span> On Break</div>
-          <div class="s-opt" onclick="openSipSettingsModal()"><span class="opt-dot" style="background:#1a3d2a"></span> SIP Settings</div>
-          <div class="s-opt" onclick="openChangePasswordModal()"><span class="opt-dot" style="background:#84C341"></span> Change Password</div>
-          <div class="s-opt logout" onclick="window.location.href='logout.php'"><span class="opt-dot" style="background:#ef4444"></span> Sign Out</div>
-        </div>
-      </div>
-    </div>
-  </header>
-
-  <!-- ── Left Navigation Sidebar (Matching Design Mockup) ──── -->
+  <!-- ── Left Navigation Sidebar with Brand Logo at Top ──── -->
   <div class="sc-sidebar" id="sidebarMenu">
+    <!-- Brand Logo at Top of Sidebar -->
+    <div class="sidebar-brand-header" onclick="switchNav('tabCampaigns', 'campaigns')">
+      <div class="sidebar-brand-card">
+        <img src="assets/images/skyservice_logo.png" alt="SkyService Logo" class="sidebar-brand-img">
+      </div>
+      <div class="sidebar-brand-titles">
+        <span class="sidebar-brand-title">SkyConnect</span>
+        <span class="sidebar-brand-subtitle">Ethio Telecom</span>
+      </div>
+    </div>
+
+    <!-- Agent & SIP Extension Status Block -->
+    <div class="sidebar-agent-card">
+      <div class="sidebar-agent-top">
+        <div class="sidebar-agent-avatar"><?php echo $initials; ?></div>
+        <div class="sidebar-agent-meta">
+          <div class="sidebar-agent-name"><?php echo $agent_name; ?></div>
+          <div class="sidebar-agent-ext" onclick="openSipSettingsModal()" title="SIP Extension Settings (Click to configure)">
+            <span class="sip-dot" id="headerSipDot"></span>
+            <span id="headerSipStatusText">Ext: <?php echo $agent_ext; ?> (Standby)</span>
+          </div>
+        </div>
+      </div>
+      
+      <!-- Status Dropdown & Live Clock -->
+      <div class="sidebar-status-row">
+        <div class="status-drop-wrap" style="flex:1;">
+          <button class="status-drop-btn" id="statusDropBtn" onclick="toggleStatusMenu()" aria-label="Status menu" style="width:100%;justify-content:space-between;padding:4px 8px;font-size:11px;">
+            <span style="display:flex;align-items:center;gap:5px;">
+              <span class="sdot ready" id="statusDot"></span>
+              <span id="statusLabel">Ready</span>
+            </span>
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.75;"><polyline points="6 9 12 15 18 9"></polyline></svg>
+          </button>
+          <div class="status-drop-menu" id="statusDropMenu" style="left:0;right:auto;bottom:auto;top:100%;">
+            <div class="s-opt" onclick="setAgentStatus('ready')"><span class="opt-dot" style="background:#00A651"></span> Available / Ready</div>
+            <div class="s-opt" onclick="setAgentStatus('idle')"><span class="opt-dot" style="background:#64748b"></span> Idle</div>
+            <div class="s-opt" onclick="setAgentStatus('break')"><span class="opt-dot" style="background:#0082C8"></span> On Break</div>
+            <div class="s-opt" onclick="openSipSettingsModal()"><span class="opt-dot" style="background:#1a3d2a"></span> SIP Settings</div>
+            <div class="s-opt" onclick="openChangePasswordModal()"><span class="opt-dot" style="background:#84C341"></span> Change Password</div>
+            <div class="s-opt logout" onclick="window.location.href='logout.php'"><span class="opt-dot" style="background:#ef4444"></span> Sign Out</div>
+          </div>
+        </div>
+        <div class="header-clock" id="liveClock" style="font-size:11px;padding:3px 7px;border-radius:6px;background:rgba(0,166,81,0.08);color:#15803d;font-family:monospace;font-weight:700;"></div>
+      </div>
+    </div>
+
+    <!-- Hidden compatibility elements -->
+    <button id="sidebarToggleBtn" style="display:none;"></button>
+    <span id="headerSectionTitle" style="display:none;"></span>
+    <span id="topUrlText" style="display:none;"></span>
+
     <div class="sc-nav-list" style="padding:10px 0;">
       
       <!-- OPERATE Group -->
@@ -1058,8 +1034,6 @@ $initials      = strtoupper(substr($currentUser['username'] ?? 'A', 0, 2));
               <th>Customer Name</th>
               <th>Phone Number</th>
               <th>Campaign</th>
-              <th>Account No.</th>
-              <th>Debt (ETB)</th>
               <th>Scheduled Call Time</th>
               <th>Status</th>
               <th>Duration</th>
@@ -1440,16 +1414,6 @@ $initials      = strtoupper(substr($currentUser['username'] ?? 'A', 0, 2));
             <label class="form-label">Phone Number</label>
             <input type="tel" id="modalAddPhone" class="form-control" placeholder="e.g. 0911223344 or +251911..." required>
           </div>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px;">
-            <div>
-              <label class="form-label">Account Number</label>
-              <input type="text" id="modalAddAccount" class="form-control" placeholder="e.g. ET-88310">
-            </div>
-            <div>
-              <label class="form-label">Debt Amount (ETB)</label>
-              <input type="number" step="0.01" id="modalAddDebt" class="form-control" placeholder="e.g. 1450.00">
-            </div>
-          </div>
           <div class="form-group" style="margin-bottom:12px;">
             <label class="form-label">Scheduled Call Time</label>
             <select id="modalAddTimePreset" class="form-control" onchange="app.handleModalPresetChange(this.value)">
@@ -1472,10 +1436,6 @@ $initials      = strtoupper(substr($currentUser['username'] ?? 'A', 0, 2));
                 <input type="time" id="modalAddCustomTime" class="form-control" style="font-size:12.5px;">
               </div>
             </div>
-          </div>
-          <div class="form-group">
-            <label class="form-label">Notes (Optional)</label>
-            <input type="text" id="modalAddNotes" class="form-control" placeholder="e.g. VIP Customer, Due ETB 450">
           </div>
         </div>
         <div class="modal-footer">
@@ -1505,7 +1465,7 @@ $initials      = strtoupper(substr($currentUser['username'] ?? 'A', 0, 2));
             <a href="javascript:void(0)" onclick="app.closeModal('modalUpload'); app.openModal('modalManual');" style="font-size:11.5px;color:#00A651;font-weight:600;text-decoration:none;">Or Paste Numbers Directly &rarr;</a>
           </div>
           <p style="font-size:11.5px;color:#64748b;margin-bottom:12px;">
-            Supports Excel (.xlsx, .xls) and CSV. Recognized columns: Name, Phone, Account Number, Debt Amount (ETB), Schedule, Notes.
+            Supports Excel (.xlsx, .xls) and CSV. Required columns: Name, Phone Number, Schedule.
           </p>
           <div class="dropzone-box" id="dropzoneBox" onclick="document.getElementById('leadFileInput').click()">
             <div style="font-size:32px;margin-bottom:6px;">📊</div>
@@ -1541,9 +1501,9 @@ $initials      = strtoupper(substr($currentUser['username'] ?? 'A', 0, 2));
             <a href="javascript:void(0)" onclick="app.closeModal('modalManual'); app.openModal('modalUpload');" style="font-size:11.5px;color:#00A651;font-weight:600;text-decoration:none;">&larr; Or Upload Excel/CSV</a>
           </div>
           <p style="font-size:11.5px;color:#64748b;margin-bottom:8px;">
-            Format: <code>0911223344</code>, <code>Helen, 0911223344</code>, or <code>Helen, 0911223344, ET-9921, 1450.00</code>
+            Format: <code>0911223344</code>, or <code>Helen Tesfaye, 0911223344, 02:30 PM</code>
           </p>
-          <textarea id="manualLeadsText" class="form-control" rows="8" placeholder="0911223344&#10;0922334455&#10;Helen Tesfaye, 0933445566, ET-88310, 450.00" required style="font-family:monospace;font-size:12px;"></textarea>
+          <textarea id="manualLeadsText" class="form-control" rows="8" placeholder="0911223344&#10;Helen Tesfaye, 0911223344, 12:00 PM&#10;Abebe Kebede, 0922334455, 02:30 PM" required style="font-family:monospace;font-size:12px;"></textarea>
         </div>
         <div class="modal-footer">
           <button type="button" class="btn btn-secondary" onclick="app.closeModal('modalManual')">Cancel</button>

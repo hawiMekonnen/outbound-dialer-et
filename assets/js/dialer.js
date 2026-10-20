@@ -2052,8 +2052,6 @@ class SkyKinDialerApp {
               </a>
             </td>
             <td>${campBadge}</td>
-            <td>${acct}</td>
-            <td>${debtFormatted}</td>
             <td><span style="${timeBadgeStyle}" title="${isDue ? 'Ready to Call' : 'Scheduled for future'}">${this.escapeHtml(callTime)}</span></td>
             <td>${stBadge}</td>
             <td>${dur}</td>
@@ -2970,9 +2968,8 @@ class SkyKinDialerApp {
       return false;
     }
 
-    // If scheduled time has arrived within the current active window (<= 3 minutes after scheduled time) -> DUE NOW
-    const diffSec = (now - scheduledTs) / 1000;
-    return diffSec <= 180;
+    // Time has arrived -> DUE NOW
+    return true;
   }
 
   getLeadScheduledTimestamp(lead) {
@@ -3225,13 +3222,13 @@ class SkyKinDialerApp {
         return !s || s === 'immediate' || s === 'now';
       });
 
-      // 2. Scheduled leads whose time has arrived (within 60 seconds)
+      // 2. Scheduled leads whose time has arrived
       const dueScheduledLeads = pendingLeads.filter(l => {
         const s = String(l.call_time || '').trim().toLowerCase();
         if (!s || s === 'immediate' || s === 'now') return false;
         const ts = this.getLeadScheduledTimestamp(l);
         if (ts <= 0) return false;
-        return (now >= ts) && ((now - ts) <= 60000);
+        return now >= ts;
       });
 
       const dueLeads = [...immediateLeads, ...dueScheduledLeads];
@@ -3302,12 +3299,12 @@ class SkyKinDialerApp {
       return ts > now;
     });
 
-    // Due right now leads: scheduled time arrived within last 60 seconds
+    // Due right now leads: scheduled time arrived
     const dueNowLeads = pending.filter(l => {
       const s = String(l.call_time || '').trim().toLowerCase();
       if (!s || s === 'immediate' || s === 'now') return false;
       const ts = this.getLeadScheduledTimestamp(l);
-      return ts > 0 && now >= ts && (now - ts) <= 60000;
+      return ts > 0 && now >= ts;
     });
 
     // Priority: Immediate > Due Now > Soonest Future
@@ -3358,20 +3355,6 @@ class SkyKinDialerApp {
       if (errorMsg) lead.error_message = errorMsg;
       this.renderActiveChannels();
       this.renderLeadsTables();
-
-      // If call completed or answered, deduplicate any duplicate pending entries with identical phone number
-      if (finalStatus === 'completed' || finalStatus === 'ivr_completed' || finalStatus === 'answered') {
-        const currentNormPhone = window.skykinNormalizeEtDial(lead.phone_number);
-        this.leads.forEach(otherLead => {
-          if (Number(otherLead.id) !== Number(lead.id) && otherLead.status === 'pending') {
-            if (window.skykinNormalizeEtDial(otherLead.phone_number) === currentNormPhone) {
-              otherLead.status = 'completed';
-              otherLead.duration_sec = durationSec;
-              this.updateLeadStatusBackend(otherLead.id, 'completed', durationSec, 'Deduplicated (Already Answered)');
-            }
-          }
-        });
-      }
 
       await this.updateLeadStatusBackend(lead.id, finalStatus, durationSec, errorMsg);
       await this.loadCampaignData();
