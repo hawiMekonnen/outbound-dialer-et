@@ -12,6 +12,12 @@ require_once __DIR__ . '/telephony/esl_client.php';
 $db = DialerDB::getInstance()->getPdo();
 $action = $_REQUEST['action'] ?? '';
 
+// Fast Route: Dedicated Ethio Telecom API Gateway Integration
+if ($action === 'ethio_telecom_receive_leads' || $action === 'ethio_telecom_docs') {
+    require __DIR__ . '/api/ethio_telecom.php';
+    exit;
+}
+
 function jsonOut($data, $status = 200) {
     http_response_code($status);
     echo json_encode($data, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
@@ -79,6 +85,156 @@ function extractLeadDate(?string $callTime, ?string $createdAt): string {
     return date('Y-m-d');
 }
 
+/**
+ * Intelligent System Auto-Scheduler
+ * Dynamically computes sequential, collision-free future call slots for leads.
+ */
+function calculateSystemAutoSchedules(PDO $db, int $campaignId, int $count, array $override = []): array {
+    if ($count <= 0) return [];
+
+    $stmt = $db->prepare("SELECT * FROM campaigns WHERE id = ?");
+    $stmt->execute([$campaignId]);
+    $camp = $stmt->fetch() ?: [];
+
+    $strategy = $override['schedule_strategy'] ?? $camp['schedule_strategy'] ?? 'interval';
+    $intervalMins = (int)($override['schedule_interval_mins'] ?? $camp['schedule_interval_mins'] ?? 5);
+    if ($intervalMins <= 0) $intervalMins = 5;
+    $winStart = $override['schedule_window_start'] ?? $camp['schedule_window_start'] ?? '09:00';
+    $winEnd = $override['schedule_window_end'] ?? $camp['schedule_window_end'] ?? '17:00';
+    $batchSize = (int)($override['schedule_batch_size'] ?? $camp['schedule_batch_size'] ?? 5);
+    if ($batchSize <= 0) $batchSize = 5;
+
+    $now = time();
+    $todayDate = date('Y-m-d');
+    $baseTs = $now + 60; // Start 1 min in the future
+
+    // Append after the latest scheduled pending lead today to prevent collisions
+    $stmtPending = $db->prepare("SELECT call_time FROM leads WHERE campaign_id = ? AND status = 'pending' AND call_time != 'Immediate' ORDER BY id DESC LIMIT 20");
+    $stmtPending->execute([$campaignId]);
+    $lastCallTimes = $stmtPending->fetchAll(PDO::FETCH_COLUMN);
+
+    $latestPendingTs = 0;
+    foreach ($lastCallTimes as $ct) {
+        $cleanTime = str_replace(['Today,', 'Today'], '', $ct);
+        $ts = @strtotime($todayDate . ' ' . trim($cleanTime));
+        if ($ts && $ts > $latestPendingTs) {
+            $latestPendingTs = $ts;
+        }
+    }
+
+    if ($latestPendingTs > $now && $strategy === 'interval') {
+        $baseTs = $latestPendingTs + ($intervalMins * 60);
+    }
+
+    $schedules = [];
+
+    if ($strategy === 'window') {
+        $startWindowTs = strtotime($todayDate . ' ' . $winStart);
+        $endWindowTs = strtotime($todayDate . ' ' . $winEnd);
+
+        if ($now > $endWindowTs) {
+            $tomorrow = date('Y-m-d', strtotime('+1 day'));
+            $startWindowTs = strtotime($tomorrow . ' ' . $winStart);
+            $endWindowTs = strtotime($tomorrow . ' ' . $winEnd);
+        } elseif ($now > $startWindowTs) {
+            $startWindowTs = $now + 120;
+        }
+
+        $windowDuration = max(60, $endWindowTs - $startWindowTs);
+        $step = ($count > 1) ? floor($windowDuration / $count) : 0;
+
+        for ($i = 0; $i < $count; $i++) {
+            $ts = $startWindowTs + ($i * $step);
+            $timePart = date('h:i A', $ts);
+            $datePart = date('Y-m-d', $ts);
+            $schedules[] = ($datePart === $todayDate) ? "Today, {$timePart}" : date('M d, ', $ts) . $timePart;
+        }
+    } elseif ($strategy === 'batch') {
+        for ($i = 0; $i < $count; $i++) {
+            $batchIndex = floor($i / $batchSize);
+            $ts = $baseTs + ($batchIndex * $intervalMins * 60);
+            $timePart = date('h:i A', $ts);
+            $datePart = date('Y-m-d', $ts);
+            $schedules[] = ($datePart === $todayDate) ? "Today, {$timePart}" : date('M d, ', $ts) . $timePart;
+        }
+    } else {
+        // Interval Staggering: +intervalMins each
+        for ($i = 0; $i < $count; $i++) {
+            $ts = $baseTs + ($i * $intervalMins * 60);
+            $timePart = date('h:i A', $ts);
+            $datePart = date('Y-m-d', $ts);
+            $schedules[] = ($datePart === $todayDate) ? "Today, {$timePart}" : date('M d, ', $ts) . $timePart;
+        }
+    }
+
+    return $schedules;
+}
+
+/**
+ * Calculates live real-time telephony metrics (Agents ready, Dialing now, Abandon rate, Avg talk time)
+ */
+function getLiveTelephonyMetrics(PDO $db, ?int $campaignId = null): array {
+    // 1. Agents ready
+    $stmt = $db->query("SELECT COUNT(*) FROM users WHERE agent_status = 'ready' AND (last_heartbeat >= CURRENT_TIMESTAMP - INTERVAL '15 minutes' OR last_heartbeat IS NULL)");
+    $agentsReady = (int)$stmt->fetchColumn();
+    if ($agentsReady < 1) {
+        $stmtTotalUsers = $db->query("SELECT COUNT(*) FROM users");
+        $totalUsers = (int)$stmtTotalUsers->fetchColumn();
+        $agentsReady = max(1, $totalUsers);
+    }
+
+    // 2. Dialing now
+    if ($campaignId && $campaignId > 0) {
+        $stmtDialing = $db->prepare("SELECT COUNT(*) FROM leads WHERE status IN ('calling', 'ringing') AND campaign_id = ?");
+        $stmtDialing->execute([$campaignId]);
+        $dialingNow = (int)$stmtDialing->fetchColumn();
+    } else {
+        $stmtDialing = $db->query("SELECT COUNT(*) FROM leads WHERE status IN ('calling', 'ringing')");
+        $dialingNow = (int)$stmtDialing->fetchColumn();
+    }
+
+    // 3. Abandon rate & 4. Avg talk time
+    $whereCamp = ($campaignId && $campaignId > 0) ? " AND campaign_id = {$campaignId}" : "";
+    $sqlLogs = "SELECT 
+        COUNT(CASE WHEN UPPER(status) IN ('ANSWERED', 'COMPLETED', 'IVR_COMPLETED') THEN 1 END) as total_ans,
+        COUNT(CASE WHEN UPPER(status) IN ('ANSWERED', 'COMPLETED', 'IVR_COMPLETED') AND duration_sec < 4 THEN 1 END) as short_hangup,
+        AVG(CASE WHEN UPPER(status) IN ('ANSWERED', 'COMPLETED', 'IVR_COMPLETED') AND duration_sec > 0 THEN duration_sec END) as avg_sec
+        FROM call_logs WHERE 1=1 {$whereCamp}";
+    $stmtLogs = $db->query($sqlLogs);
+    $r = $stmtLogs->fetch();
+
+    $totalAns = (int)($r['total_ans'] ?? 0);
+    $shortHangup = (int)($r['short_hangup'] ?? 0);
+    $avgSec = (int)round((float)($r['avg_sec'] ?? 0));
+
+    // If call_logs is empty, fallback to leads
+    if ($totalAns === 0) {
+        $leadSql = "SELECT 
+            COUNT(CASE WHEN status IN ('completed', 'answered') THEN 1 END) as total_ans,
+            COUNT(CASE WHEN status IN ('completed', 'answered') AND duration_sec < 4 AND duration_sec > 0 THEN 1 END) as short_hangup,
+            AVG(CASE WHEN status IN ('completed', 'answered') AND duration_sec > 0 THEN duration_sec END) as avg_sec
+            FROM leads WHERE 1=1 {$whereCamp}";
+        $leadRes = $db->query($leadSql)->fetch();
+        $totalAns = (int)($leadRes['total_ans'] ?? 0);
+        $shortHangup = (int)($leadRes['short_hangup'] ?? 0);
+        $avgSec = (int)round((float)($leadRes['avg_sec'] ?? 0));
+    }
+
+    $abandonRate = $totalAns > 0 ? round(($shortHangup / $totalAns) * 100, 1) : 0.0;
+    $avgTalkFormatted = sprintf('%02d:%02d', floor($avgSec / 60), $avgSec % 60);
+
+    return [
+        'agents_ready' => $agentsReady,
+        'dialing_now' => $dialingNow,
+        'abandon_rate' => $abandonRate,
+        'abandon_rate_formatted' => $abandonRate . '%',
+        'abandon_target_ok' => ($abandonRate <= 3.0),
+        'avg_talk_time_sec' => $avgSec,
+        'avg_talk_time_formatted' => $avgTalkFormatted,
+        'total_answered_calls' => $totalAns
+    ];
+}
+
 // 0. Get All Campaigns for Campaigns Overview Table
 if ($action === 'get_all_campaigns') {
     $stmt = $db->query("SELECT c.*, 
@@ -89,7 +245,33 @@ if ($action === 'get_all_campaigns') {
         (SELECT COUNT(*) FROM leads WHERE campaign_id = c.id AND status = 'no_answer') as no_answer_leads_count
         FROM campaigns c ORDER BY c.id ASC");
     $campaigns = $stmt->fetchAll();
-    jsonOut(['success' => true, 'campaigns' => $campaigns]);
+    $telephonyMetrics = getLiveTelephonyMetrics($db);
+    jsonOut(['success' => true, 'campaigns' => $campaigns, 'telephony_metrics' => $telephonyMetrics]);
+}
+
+// Get Live Telephony Metrics
+if ($action === 'get_telephony_metrics') {
+    $campaignId = isset($_GET['campaign_id']) ? (int)$_GET['campaign_id'] : null;
+    $metrics = getLiveTelephonyMetrics($db, $campaignId);
+    jsonOut(['success' => true, 'metrics' => $metrics]);
+}
+
+// Agent Heartbeat & Live Telephony Metrics Refresh
+if ($action === 'agent_heartbeat') {
+    $username = $_SESSION['username'] ?? 'Agent1';
+    $status = trim($_POST['status'] ?? 'ready');
+    if (!in_array($status, ['ready', 'on_call', 'busy', 'break', 'offline'])) {
+        $status = 'ready';
+    }
+    $campaignId = isset($_POST['campaign_id']) ? (int)$_POST['campaign_id'] : null;
+
+    try {
+        $stmtHb = $db->prepare("UPDATE users SET agent_status = ?, last_heartbeat = CURRENT_TIMESTAMP WHERE username = ?");
+        $stmtHb->execute([$status, $username]);
+    } catch (Exception $e) {}
+
+    $metrics = getLiveTelephonyMetrics($db, $campaignId);
+    jsonOut(['success' => true, 'status' => $status, 'metrics' => $metrics]);
 }
 
 // Create New Campaign
@@ -102,8 +284,22 @@ if ($action === 'create_campaign') {
     $messageText = trim($_POST['message_text'] ?? '');
     $audioFile = trim($_POST['audio_file'] ?? 'assets/audio/welcome_human_voice.wav');
 
-    $stmt = $db->prepare("INSERT INTO campaigns (name, type, status, caller_id_name, caller_id_number, ivr_language, ivr_message_text, ivr_audio_file, created_by) VALUES (?, ?, 'idle', ?, ?, ?, ?, ?, ?)");
-    $stmt->execute([$name, $type, $callerIdName, $callerIdNumber, $language, $messageText, $audioFile, $_SESSION['username'] ?? 'Agent1']);
+    $callingMethod = trim($_POST['calling_method'] ?? 'manual');
+    if (!in_array($callingMethod, ['manual', 'auto_schedule'])) $callingMethod = 'manual';
+    $scheduleStrategy = trim($_POST['schedule_strategy'] ?? 'interval');
+    if (!in_array($scheduleStrategy, ['interval', 'window', 'batch'])) $scheduleStrategy = 'interval';
+    $scheduleIntervalMins = max(1, (int)($_POST['schedule_interval_mins'] ?? 5));
+    $scheduleWindowStart = trim($_POST['schedule_window_start'] ?? '09:00');
+    $scheduleWindowEnd = trim($_POST['schedule_window_end'] ?? '17:00');
+    $scheduleBatchSize = max(1, (int)($_POST['schedule_batch_size'] ?? 5));
+    $scheduleStartTime = trim($_POST['schedule_start_time'] ?? 'now');
+
+    $stmt = $db->prepare("INSERT INTO campaigns (name, type, status, caller_id_name, caller_id_number, ivr_language, ivr_message_text, ivr_audio_file, created_by, calling_method, schedule_strategy, schedule_interval_mins, schedule_window_start, schedule_window_end, schedule_batch_size, schedule_start_time) VALUES (?, ?, 'idle', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+    $stmt->execute([
+        $name, $type, $callerIdName, $callerIdNumber, $language, $messageText, $audioFile, 
+        $_SESSION['username'] ?? 'Agent1',
+        $callingMethod, $scheduleStrategy, $scheduleIntervalMins, $scheduleWindowStart, $scheduleWindowEnd, $scheduleBatchSize, $scheduleStartTime
+    ]);
     $newId = (int)$db->lastInsertId();
 
     jsonOut(['success' => true, 'campaign_id' => $newId, 'message' => 'Campaign created successfully']);
@@ -137,6 +333,13 @@ if ($action === 'save_campaign_designer') {
     $audioName = trim($_POST['audio_name'] ?? '');
     $type = trim($_POST['type'] ?? '');
 
+    $callingMethod = $_POST['calling_method'] ?? null;
+    $scheduleStrategy = $_POST['schedule_strategy'] ?? null;
+    $scheduleIntervalMins = isset($_POST['schedule_interval_mins']) ? (int)$_POST['schedule_interval_mins'] : null;
+    $scheduleWindowStart = $_POST['schedule_window_start'] ?? null;
+    $scheduleWindowEnd = $_POST['schedule_window_end'] ?? null;
+    $scheduleBatchSize = isset($_POST['schedule_batch_size']) ? (int)$_POST['schedule_batch_size'] : null;
+
     $updates = [];
     $params = [];
     if (!empty($name)) { $updates[] = "name = ?"; $params[] = $name; }
@@ -145,6 +348,25 @@ if ($action === 'save_campaign_designer') {
     if (!empty($audioFile)) { $updates[] = "ivr_audio_file = ?"; $params[] = $audioFile; }
     if (!empty($audioName)) { $updates[] = "ivr_audio_name = ?"; $params[] = $audioName; }
     if (!empty($type)) { $updates[] = "type = ?"; $params[] = $type; }
+
+    if ($callingMethod !== null && in_array($callingMethod, ['manual', 'auto_schedule'])) {
+        $updates[] = "calling_method = ?"; $params[] = $callingMethod;
+    }
+    if ($scheduleStrategy !== null && in_array($scheduleStrategy, ['interval', 'window', 'batch'])) {
+        $updates[] = "schedule_strategy = ?"; $params[] = $scheduleStrategy;
+    }
+    if ($scheduleIntervalMins !== null && $scheduleIntervalMins > 0) {
+        $updates[] = "schedule_interval_mins = ?"; $params[] = $scheduleIntervalMins;
+    }
+    if (!empty($scheduleWindowStart)) {
+        $updates[] = "schedule_window_start = ?"; $params[] = $scheduleWindowStart;
+    }
+    if (!empty($scheduleWindowEnd)) {
+        $updates[] = "schedule_window_end = ?"; $params[] = $scheduleWindowEnd;
+    }
+    if ($scheduleBatchSize !== null && $scheduleBatchSize > 0) {
+        $updates[] = "schedule_batch_size = ?"; $params[] = $scheduleBatchSize;
+    }
 
     if (!empty($updates)) {
         $updates[] = "updated_at = CURRENT_TIMESTAMP";
@@ -529,9 +751,102 @@ if ($action === 'get_campaign_data') {
             'today_pending' => $todayPending,
             'today_connected' => $todayConnected
         ],
+        'telephony_metrics' => getLiveTelephonyMetrics($db, count($campaignIds) === 1 ? $campaignIds[0] : null),
         'audio_recordings' => $recordings,
         'recent_logs' => $logs
     ]);
+}
+
+function colLetterToIdx(string $letters): int {
+    $idx = 0;
+    $letters = strtoupper(trim($letters));
+    for ($i = 0; $i < strlen($letters); $i++) {
+        $idx = $idx * 26 + (ord($letters[$i]) - ord('A') + 1);
+    }
+    return max(0, $idx - 1);
+}
+
+function normalizeScheduledTime(string $rawTime): string {
+    $s = trim($rawTime);
+    if (empty($s) || in_array(strtolower($s), ['immediate', 'now', 'none', '-'])) {
+        return 'Immediate';
+    }
+
+    // 1. Numeric Excel serial time / date
+    if (is_numeric($s)) {
+        $num = (float)$s;
+        if ($num > 0 && $num < 1) {
+            $totalSec = (int)round($num * 86400);
+            $hrs = (int)floor($totalSec / 3600);
+            $mins = (int)floor(($totalSec % 3600) / 60);
+            return sprintf('%02d:%02d', $hrs, $mins);
+        }
+        if ($num >= 30000 && $num < 70000) {
+            $ts = ($num - 25569) * 86400;
+            return gmdate('Y-m-d H:i', (int)round($ts));
+        }
+    }
+
+    // 2. Full Date + Time: "2026-10-26 09:10 AM", "2026-10-28 05:00 PM", "2026-10-26 14:30"
+    if (preg_match('/^(\d{4}[-\/]\d{1,2}[-\/]\d{1,2})\s+(\d{1,2})[:.](\d{2})(?:[:.]\d{2})?\s*(AM|PM)?/i', $s, $m)) {
+        $datePart = str_replace('/', '-', $m[1]);
+        $hrs = (int)$m[2];
+        $mins = (int)$m[3];
+        $ampm = isset($m[4]) ? strtoupper($m[4]) : '';
+        if ($ampm === 'PM' && $hrs < 12) $hrs += 12;
+        if ($ampm === 'AM' && $hrs === 12) $hrs = 0;
+        return sprintf('%s %02d:%02d', $datePart, $hrs, $mins);
+    }
+
+    // 3. Format: "DD/MM/YYYY HH:MM AM/PM"
+    if (preg_match('/^(\d{1,2})[\/\.-](\d{1,2})[\/\.-](\d{4})\s+(\d{1,2})[:.](\d{2})(?:[:.]\d{2})?\s*(AM|PM)?/i', $s, $m)) {
+        $hrs = (int)$m[4];
+        $mins = (int)$m[5];
+        $ampm = isset($m[6]) ? strtoupper($m[6]) : '';
+        if ($ampm === 'PM' && $hrs < 12) $hrs += 12;
+        if ($ampm === 'AM' && $hrs === 12) $hrs = 0;
+        return sprintf('%04d-%02d-%02d %02d:%02d', (int)$m[3], (int)$m[2], (int)$m[1], $hrs, $mins);
+    }
+
+    // 4. Format: "02:30 PM", "2:30 PM", "09:15 AM"
+    if (preg_match('/^(\d{1,2})[:.](\d{2})(?:[:.](\d{2}))?\s*(AM|PM)$/i', $s, $m)) {
+        $hrs = (int)$m[1];
+        $mins = (int)$m[2];
+        $ampm = strtoupper($m[4]);
+        if ($ampm === 'PM' && $hrs < 12) $hrs += 12;
+        if ($ampm === 'AM' && $hrs === 12) $hrs = 0;
+        return sprintf('%02d:%02d', $hrs, $mins);
+    }
+
+    // 5. Format: "14:30" or "14:30:00" or "9:15"
+    if (preg_match('/^(\d{1,2})[:.](\d{2})(?:[:.](\d{2}))?$/', $s, $m)) {
+        return sprintf('%02d:%02d', (int)$m[1], (int)$m[2]);
+    }
+
+    // 6. Today / Tomorrow prefix: "Today, 14:30", "Today 02:30 PM"
+    if (preg_match('/^(Today|Tomorrow)[,\s]+(.*)$/i', $s, $m)) {
+        $sub = normalizeScheduledTime($m[2]);
+        if ($sub !== 'Immediate') {
+            return ucfirst(strtolower($m[1])) . ', ' . $sub;
+        }
+    }
+
+    // 7. Relative: "+5 mins", "+10 min"
+    if (preg_match('/^\+(\d+)\s*(mins?|minutes?|hours?|hrs?)$/i', $s)) {
+        return $s;
+    }
+
+    // 8. Fallback parse
+    $parsed = strtotime($s);
+    if ($parsed !== false && $parsed > 0) {
+        if (preg_match('/\b20\d{2}\b/', $s)) {
+            return date('Y-m-d H:i', $parsed);
+        } else {
+            return date('H:i', $parsed);
+        }
+    }
+
+    return $s;
 }
 
 function extractRowsFromUploadedFile(string $filePath, string $origName): array {
@@ -581,7 +896,15 @@ function extractRowsFromUploadedFile(string $filePath, string $origName): array 
                     $rows = [];
                     foreach ($xml->sheetData->row as $row) {
                         $currentRow = [];
+                        $maxCol = -1;
                         foreach ($row->c as $c) {
+                            $coord = (string)$c['r'];
+                            $colIdx = $maxCol + 1;
+                            if (preg_match('/^([A-Z]+)(\d+)$/i', $coord, $cm)) {
+                                $colIdx = colLetterToIdx($cm[1]);
+                            }
+                            $maxCol = max($maxCol, $colIdx);
+
                             $cellType = (string)$c['t'];
                             $val = (string)$c->v;
                             if ($cellType === 's') {
@@ -591,11 +914,20 @@ function extractRowsFromUploadedFile(string $filePath, string $origName): array 
                                 $cellVal = (string)$c->is->t;
                             } else {
                                 $cellVal = $val;
+                                if (is_numeric($val) && (float)$val > 0 && (float)$val < 1) {
+                                    $cellVal = normalizeScheduledTime($val);
+                                }
                             }
-                            $currentRow[] = trim($cellVal);
+                            $currentRow[$colIdx] = trim($cellVal);
                         }
-                        if (!empty(array_filter($currentRow))) {
-                            $rows[] = $currentRow;
+                        if ($maxCol >= 0) {
+                            $filledRow = [];
+                            for ($ci = 0; $ci <= $maxCol; $ci++) {
+                                $filledRow[$ci] = $currentRow[$ci] ?? '';
+                            }
+                            if (!empty(array_filter($filledRow))) {
+                                $rows[] = $filledRow;
+                            }
                         }
                     }
                     if (!empty($rows)) return $rows;
@@ -647,6 +979,20 @@ if ($action === 'upload_leads') {
         jsonOut(['success' => false, 'error' => 'No valid file uploaded.'], 400);
     }
 
+    $campStmt = $db->prepare("SELECT * FROM campaigns WHERE id = ?");
+    $campStmt->execute([$campaignId]);
+    $camp = $campStmt->fetch() ?: [];
+
+    $forceAutoSchedule = (isset($_POST['auto_schedule']) && in_array(strtolower(trim($_POST['auto_schedule'])), ['1', 'true', 'yes', 'on']));
+    $isAutoScheduleCampaign = (($camp['calling_method'] ?? 'manual') === 'auto_schedule') || $forceAutoSchedule;
+
+    $overrideOptions = [];
+    if (!empty($_POST['schedule_strategy'])) $overrideOptions['schedule_strategy'] = trim($_POST['schedule_strategy']);
+    if (!empty($_POST['schedule_interval_mins'])) $overrideOptions['schedule_interval_mins'] = (int)$_POST['schedule_interval_mins'];
+    if (!empty($_POST['schedule_window_start'])) $overrideOptions['schedule_window_start'] = trim($_POST['schedule_window_start']);
+    if (!empty($_POST['schedule_window_end'])) $overrideOptions['schedule_window_end'] = trim($_POST['schedule_window_end']);
+    if (!empty($_POST['schedule_batch_size'])) $overrideOptions['schedule_batch_size'] = (int)$_POST['schedule_batch_size'];
+
     $filePath = $_FILES['lead_file']['tmp_name'];
     $origName = $_FILES['lead_file']['name'] ?? 'leads.csv';
     $rows = extractRowsFromUploadedFile($filePath, $origName);
@@ -657,8 +1003,7 @@ if ($action === 'upload_leads') {
 
     $imported = 0;
     $invalid = 0;
-
-    $stmtInsert = $db->prepare("INSERT INTO leads (campaign_id, customer_name, phone_number, account_number, debt_amount, call_time, notes, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')");
+    $pendingRows = [];
 
     $isFirstLine = true;
     $phoneIdx = 1;
@@ -683,7 +1028,7 @@ if ($action === 'upload_leads') {
                 } elseif (strpos($h, 'name') !== false || strpos($h, 'customer') !== false || strpos($h, 'client') !== false) {
                     $nameIdx = $idx;
                     $foundHeader = true;
-                } elseif (strpos($h, 'time') !== false || strpos($h, 'hour') !== false || strpos($h, 'schedule') !== false) {
+                } elseif (strpos($h, 'time') !== false || strpos($h, 'hour') !== false || strpos($h, 'schedule') !== false || strpos($h, 'call') !== false || strpos($h, 'slot') !== false || strpos($h, 'due') !== false) {
                     $timeIdx = $idx;
                     $foundHeader = true;
                 } elseif (strpos($h, 'account') !== false || strpos($h, 'acc') !== false) {
@@ -729,13 +1074,64 @@ if ($action === 'upload_leads') {
             $name = 'Customer (' . substr($phone, -4) . ')';
         }
 
-        $callTime = trim($cols[$timeIdx] ?? 'Immediate');
-        if (empty($callTime) || $timeIdx === $usedPhoneIdx) $callTime = 'Immediate';
+        $rawCallTime = trim($cols[$timeIdx] ?? 'Immediate');
+        if (empty($rawCallTime) || $timeIdx === $usedPhoneIdx || $timeIdx >= count($cols)) $rawCallTime = 'Immediate';
+        
+        // If time is missing/immediate, inspect other columns for explicit time patterns
+        if ($rawCallTime === 'Immediate' || empty($rawCallTime)) {
+            foreach ($cols as $idx => $val) {
+                if ($idx === $usedPhoneIdx || $idx === $usedNameIdx) continue;
+                $trimmed = trim((string)$val);
+                if (preg_match('/(\d{1,2}:\d{2})|(\d{1,2}\s*(?:AM|PM))/i', $trimmed) || (is_numeric($trimmed) && (float)$trimmed > 0 && (float)$trimmed < 1)) {
+                    $rawCallTime = $trimmed;
+                    break;
+                }
+            }
+        }
+
+        $callTime = normalizeScheduledTime($rawCallTime);
         $notes = trim($cols[$notesIdx] ?? 'Imported');
         $account = ($accountIdx >= 0 && isset($cols[$accountIdx])) ? trim($cols[$accountIdx]) : '';
         $debt = ($debtIdx >= 0 && isset($cols[$debtIdx])) ? floatval(preg_replace('/[^\d.]/', '', $cols[$debtIdx])) : 0.00;
 
-        $stmtInsert->execute([$campaignId, $name, $phone, $account, $debt, $callTime, $notes]);
+        $isImmediate = ($callTime === 'Immediate' || empty($callTime) || stripos($callTime, 'immediate') !== false);
+        // If file contains an explicit scheduled time (e.g. 14:30, 02:30 PM), PRESERVE IT and never overwrite with auto-schedule!
+        $needsSchedule = $isImmediate && ($isAutoScheduleCampaign || $forceAutoSchedule);
+
+        $pendingRows[] = [
+            'name' => $name,
+            'phone' => $phone,
+            'account' => $account,
+            'debt' => $debt,
+            'callTime' => $callTime,
+            'notes' => $notes,
+            'needsSchedule' => $needsSchedule
+        ];
+    }
+
+    // Auto-schedule calculation for rows that need system scheduling
+    if ($isAutoScheduleCampaign) {
+        $countNeedingSchedule = 0;
+        foreach ($pendingRows as $r) {
+            if ($r['needsSchedule']) $countNeedingSchedule++;
+        }
+        if ($countNeedingSchedule > 0) {
+            $autoTimes = calculateSystemAutoSchedules($db, $campaignId, $countNeedingSchedule, $overrideOptions);
+            $timeCursor = 0;
+            foreach ($pendingRows as &$r) {
+                if ($r['needsSchedule'] && isset($autoTimes[$timeCursor])) {
+                    $r['callTime'] = $autoTimes[$timeCursor];
+                    $timeCursor++;
+                }
+            }
+            unset($r);
+        }
+    }
+
+    $stmtInsert = $db->prepare("INSERT INTO leads (campaign_id, customer_name, phone_number, account_number, debt_amount, call_time, notes, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')");
+
+    foreach ($pendingRows as $r) {
+        $stmtInsert->execute([$campaignId, $r['name'], $r['phone'], $r['account'], $r['debt'], $r['callTime'], $r['notes']]);
         $imported++;
     }
 
@@ -756,7 +1152,7 @@ if ($action === 'upload_leads') {
         'imported' => $imported,
         'invalid' => $invalid,
         'leads' => $allLeads,
-        'message' => "Successfully imported {$imported} leads from " . htmlspecialchars($origName) . "."
+        'message' => "Successfully imported {$imported} leads from " . htmlspecialchars($origName) . ($isAutoScheduleCampaign ? " with system auto-scheduling." : ".")
     ]);
 }
 
@@ -769,13 +1165,25 @@ if ($action === 'save_manual_leads') {
         jsonOut(['success' => false, 'error' => 'Please enter at least one phone number.'], 400);
     }
 
+    $campStmt = $db->prepare("SELECT * FROM campaigns WHERE id = ?");
+    $campStmt->execute([$campaignId]);
+    $camp = $campStmt->fetch() ?: [];
+
+    $forceAutoSchedule = (isset($_POST['auto_schedule']) && in_array(strtolower(trim($_POST['auto_schedule'])), ['1', 'true', 'yes', 'on']));
+    $isAutoScheduleCampaign = (($camp['calling_method'] ?? 'manual') === 'auto_schedule') || $forceAutoSchedule;
+
+    $overrideOptions = [];
+    if (!empty($_POST['schedule_strategy'])) $overrideOptions['schedule_strategy'] = trim($_POST['schedule_strategy']);
+    if (!empty($_POST['schedule_interval_mins'])) $overrideOptions['schedule_interval_mins'] = (int)$_POST['schedule_interval_mins'];
+    if (!empty($_POST['schedule_window_start'])) $overrideOptions['schedule_window_start'] = trim($_POST['schedule_window_start']);
+    if (!empty($_POST['schedule_window_end'])) $overrideOptions['schedule_window_end'] = trim($_POST['schedule_window_end']);
+    if (!empty($_POST['schedule_batch_size'])) $overrideOptions['schedule_batch_size'] = (int)$_POST['schedule_batch_size'];
+
     $lines = preg_split('/\r\n|\r|\n/', $text);
     $imported = 0;
     $duplicates = 0;
     $invalid = 0;
-
-    $stmtCheck = $db->prepare("SELECT id FROM leads WHERE campaign_id = ? AND phone_number = ?");
-    $stmtInsert = $db->prepare("INSERT INTO leads (campaign_id, customer_name, phone_number, account_number, debt_amount, call_time, notes, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')");
+    $pendingRows = [];
 
     foreach ($lines as $line) {
         $line = trim($line);
@@ -815,14 +1223,51 @@ if ($action === 'save_manual_leads') {
             continue;
         }
 
-        $stmtCheck = $db->prepare("SELECT id FROM leads WHERE campaign_id = ? AND phone_number = ? AND call_time = ? AND status = 'pending'");
-        $stmtCheck->execute([$campaignId, $phone, $callTime]);
+        $callTime = normalizeScheduledTime($callTime);
+        $isImmediate = ($callTime === 'Immediate' || empty($callTime) || stripos($callTime, 'immediate') !== false);
+        // Preserve user manual explicit schedule time (e.g. 14:30)
+        $needsSchedule = $isImmediate && ($isAutoScheduleCampaign || $forceAutoSchedule);
+
+        $pendingRows[] = [
+            'name' => $name,
+            'phone' => $phone,
+            'account' => $account,
+            'debt' => $debt,
+            'callTime' => $callTime,
+            'notes' => $notes,
+            'needsSchedule' => $needsSchedule
+        ];
+    }
+
+    if ($isAutoScheduleCampaign) {
+        $countNeedingSchedule = 0;
+        foreach ($pendingRows as $r) {
+            if ($r['needsSchedule']) $countNeedingSchedule++;
+        }
+        if ($countNeedingSchedule > 0) {
+            $autoTimes = calculateSystemAutoSchedules($db, $campaignId, $countNeedingSchedule, $overrideOptions);
+            $timeCursor = 0;
+            foreach ($pendingRows as &$r) {
+                if ($r['needsSchedule'] && isset($autoTimes[$timeCursor])) {
+                    $r['callTime'] = $autoTimes[$timeCursor];
+                    $timeCursor++;
+                }
+            }
+            unset($r);
+        }
+    }
+
+    $stmtCheck = $db->prepare("SELECT id FROM leads WHERE campaign_id = ? AND phone_number = ? AND call_time = ? AND status = 'pending'");
+    $stmtInsert = $db->prepare("INSERT INTO leads (campaign_id, customer_name, phone_number, account_number, debt_amount, call_time, notes, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')");
+
+    foreach ($pendingRows as $r) {
+        $stmtCheck->execute([$campaignId, $r['phone'], $r['callTime']]);
         if ($stmtCheck->fetch()) {
             $duplicates++;
             continue;
         }
 
-        $stmtInsert->execute([$campaignId, $name, $phone, $account, $debt, $callTime, $notes]);
+        $stmtInsert->execute([$campaignId, $r['name'], $r['phone'], $r['account'], $r['debt'], $r['callTime'], $r['notes']]);
         $imported++;
     }
 
@@ -838,7 +1283,7 @@ if ($action === 'save_manual_leads') {
         'imported' => $imported,
         'duplicates' => $duplicates,
         'invalid' => $invalid,
-        'message' => "Successfully added {$imported} leads to PostgreSQL."
+        'message' => "Successfully added {$imported} leads" . ($isAutoScheduleCampaign ? " with system auto-scheduling." : ".")
     ]);
 }
 
@@ -858,6 +1303,17 @@ if ($action === 'add_single_lead') {
     }
     if (empty($name)) {
         $name = 'Customer (' . substr($phone, -4) . ')';
+    }
+
+    $campStmt = $db->prepare("SELECT calling_method, schedule_strategy, schedule_interval_mins FROM campaigns WHERE id = ?");
+    $campStmt->execute([$campaignId]);
+    $camp = $campStmt->fetch() ?: [];
+
+    if (($callTime === 'Immediate' || empty($callTime) || stripos($callTime, 'immediate') !== false) && (($camp['calling_method'] ?? '') === 'auto_schedule' || !empty($_POST['auto_schedule']))) {
+        $singleTimes = calculateSystemAutoSchedules($db, $campaignId, 1);
+        if (!empty($singleTimes[0])) {
+            $callTime = $singleTimes[0];
+        }
     }
 
     // Check if number is in DNC registry

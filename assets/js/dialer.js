@@ -70,6 +70,7 @@ class SkyKinDialerApp {
     this.ringbackInterval = null;
     this.selectedCampaignIds = [1];
     this.selectedCampaigns = [];
+    this.telephonyMetrics = null;
 
     this.initElements();
     this.initEventListeners();
@@ -81,6 +82,7 @@ class SkyKinDialerApp {
     this.loadCampaignData();
     this.loadCampaignsOverview();
     this.loadCallbacksList();
+    this.startTelephonyMetricsHeartbeat();
   }
 
   initElements() {
@@ -132,6 +134,15 @@ class SkyKinDialerApp {
     document.getElementById('formManualLeads')?.addEventListener('submit', (e) => this.handleManualUpload(e));
     document.getElementById('formUploadAudio')?.addEventListener('submit', (e) => this.handleAudioUpload(e));
 
+    const uploadStratSel = document.getElementById('uploadScheduleStrategy');
+    if (uploadStratSel) {
+      uploadStratSel.addEventListener('change', (e) => this.handleUploadStrategyChange(e.target.value));
+    }
+    const manualStratSel = document.getElementById('manualScheduleStrategy');
+    if (manualStratSel) {
+      manualStratSel.addEventListener('change', (e) => this.handleManualStrategyChange(e.target.value));
+    }
+
     // Drag and Drop
     const dropzone = document.getElementById('dropzoneBox');
     const fileInput = document.getElementById('leadFileInput');
@@ -139,7 +150,12 @@ class SkyKinDialerApp {
       dropzone.addEventListener('click', () => fileInput.click());
       fileInput.addEventListener('change', () => {
         if (fileInput.files.length > 0) {
-          document.getElementById('selectedFileName').textContent = fileInput.files[0].name;
+          const fn = fileInput.files[0].name;
+          const fnEl = document.getElementById('selectedFileName');
+          if (fnEl) fnEl.textContent = fn;
+          const campInp = document.getElementById('newCampaignContactsInput');
+          if (campInp) campInp.value = fn;
+          this.pendingCampaignFile = fileInput.files[0];
         }
       });
       ['dragenter', 'dragover'].forEach(ev => dropzone.addEventListener(ev, (e) => { e.preventDefault(); dropzone.classList.add('dragover'); }));
@@ -148,7 +164,12 @@ class SkyKinDialerApp {
         dropzone.classList.remove('dragover');
         if (ev === 'drop' && e.dataTransfer.files.length > 0) {
           fileInput.files = e.dataTransfer.files;
-          document.getElementById('selectedFileName').textContent = fileInput.files[0].name;
+          const fn = fileInput.files[0].name;
+          const fnEl = document.getElementById('selectedFileName');
+          if (fnEl) fnEl.textContent = fn;
+          const campInp = document.getElementById('newCampaignContactsInput');
+          if (campInp) campInp.value = fn;
+          this.pendingCampaignFile = fileInput.files[0];
         }
       }));
     }
@@ -391,6 +412,7 @@ class SkyKinDialerApp {
 
     if (statusText) statusText.textContent = text;
     if (headerText) headerText.textContent = text;
+    this.updateTelephonyKpiCards();
   }
 
   async sipMakeCall(rawTarget, dom, callbacks = {}, lineNum = 1) {
@@ -747,6 +769,13 @@ class SkyKinDialerApp {
 
   openModal(modalId) {
     document.getElementById(modalId)?.classList.add('open');
+    if (modalId === 'modalUpload') {
+      const strat = document.getElementById('uploadScheduleStrategy')?.value || 'interval';
+      this.handleUploadStrategyChange(strat);
+    } else if (modalId === 'modalManual') {
+      const strat = document.getElementById('manualScheduleStrategy')?.value || 'interval';
+      this.handleManualStrategyChange(strat);
+    }
   }
 
   closeModal(modalId) {
@@ -826,6 +855,12 @@ class SkyKinDialerApp {
       this.availableDates = data.available_dates || [];
       this.remainingCount = data.remaining_count || 0;
 
+      if (data.telephony_metrics) {
+        this.updateTelephonyKpiCards(data.telephony_metrics);
+      } else {
+        this.updateTelephonyKpiCards();
+      }
+
       this.renderCampaignHeader();
       this.renderDialerCampaignSelector();
       this.renderStats();
@@ -899,7 +934,8 @@ class SkyKinDialerApp {
     const pendingCount = (this.leads || []).filter(l => l.status === 'pending').length;
     const agentQueueStatus = document.getElementById('agentQueueStatusText');
     if (agentQueueStatus) {
-      agentQueueStatus.innerHTML = `Ready &middot; ${pendingCount} lead${pendingCount === 1 ? '' : 's'} in queue`;
+      const stateLabel = this.isRunning ? (this.isPaused ? 'Paused' : 'Active') : 'Ready';
+      agentQueueStatus.innerHTML = `${stateLabel} &middot; ${pendingCount} lead${pendingCount === 1 ? '' : 's'} in queue`;
     }
 
     if (badge) {
@@ -983,6 +1019,130 @@ class SkyKinDialerApp {
     this.renderDialerCampaignSelector();
   }
 
+  /* ─────────────────────────────────────────────────────────
+     Live Telephony Metrics & KPI Cards (Agent & Campaigns)
+     ───────────────────────────────────────────────────────── */
+  updateTelephonyKpiCards(metrics = null) {
+    if (metrics) {
+      this.telephonyMetrics = metrics;
+    } else if (!this.telephonyMetrics) {
+      this.telephonyMetrics = {
+        agents_ready: 1,
+        dialing_now: 0,
+        abandon_rate: 0.0,
+        abandon_rate_formatted: '0.0%',
+        abandon_target_ok: true,
+        avg_talk_time_formatted: '00:00'
+      };
+    }
+
+    const m = this.telephonyMetrics;
+
+    // Real live agent count: use server count, ensure at least 1 if SIP registered
+    const sipReady = (this.line1?.isRegistered || this.line2?.isRegistered);
+    const serverAgents = parseInt(m.agents_ready, 10) || 0;
+    const finalAgentsReady = Math.max(serverAgents, sipReady ? 1 : 0);
+
+    // Real dialing now count: combine active browser channels + server leads in calling/ringing
+    const liveBrowserDialing = (this.activeChannels && this.activeChannels.size) ? this.activeChannels.size : 0;
+    const serverDialing = parseInt(m.dialing_now, 10) || 0;
+    const finalDialingNow = Math.max(liveBrowserDialing, serverDialing);
+
+    // Abandon rate & regulatory compliance check (< 3.0% target)
+    const abandonRateNum = typeof m.abandon_rate === 'number' ? m.abandon_rate : parseFloat(m.abandon_rate || '0');
+    const abandonFormatted = m.abandon_rate_formatted || (abandonRateNum.toFixed(1) + '%');
+    const isCompliant = abandonRateNum <= 3.0;
+
+    // Avg talk time
+    const avgTalk = m.avg_talk_time_formatted || '00:00';
+
+    // 1. Update Campaigns Overview Cards
+    const elKpiAgents = document.getElementById('kpiAgentsReady');
+    const elKpiDialing = document.getElementById('kpiDialingNow');
+    const elKpiAbandon = document.getElementById('kpiAbandonRate');
+    const elKpiAbandonLbl = document.getElementById('kpiAbandonRateLbl');
+    const elKpiAvgTalk = document.getElementById('kpiAvgTalkTime');
+
+    if (elKpiAgents) elKpiAgents.textContent = finalAgentsReady;
+    if (elKpiDialing) elKpiDialing.textContent = finalDialingNow;
+    if (elKpiAbandon) {
+      elKpiAbandon.textContent = abandonFormatted;
+      elKpiAbandon.className = 'camp-metric-val ' + (isCompliant ? 'green' : 'red');
+    }
+    if (elKpiAbandonLbl) {
+      elKpiAbandonLbl.innerHTML = isCompliant 
+        ? 'Abandon rate &bull; <span style="color:#00A651;font-weight:600;">Compliant (&lt;3%)</span>' 
+        : 'Abandon rate &bull; <span style="color:#dc2626;font-weight:600;">Above 3% Target</span>';
+    }
+    if (elKpiAvgTalk) elKpiAvgTalk.textContent = avgTalk;
+
+    // 2. Update Agent Screen / Softphone Screen Cards
+    const elAgentAgents = document.getElementById('agentKpiAgentsReady');
+    const elAgentDialing = document.getElementById('agentKpiDialingNow');
+    const elAgentAbandon = document.getElementById('agentKpiAbandonRate');
+    const elAgentAbandonLbl = document.getElementById('agentKpiAbandonRateLbl');
+    const elAgentAvgTalk = document.getElementById('agentKpiAvgTalkTime');
+
+    if (elAgentAgents) elAgentAgents.textContent = finalAgentsReady;
+    if (elAgentDialing) elAgentDialing.textContent = finalDialingNow;
+    if (elAgentAbandon) {
+      elAgentAbandon.textContent = abandonFormatted;
+      elAgentAbandon.className = 'camp-metric-val ' + (isCompliant ? 'green' : 'red');
+    }
+    if (elAgentAbandonLbl) {
+      elAgentAbandonLbl.innerHTML = isCompliant 
+        ? 'Abandon rate &bull; <span style="color:#00A651;font-weight:600;">Compliant (&lt;3%)</span>' 
+        : 'Abandon rate &bull; <span style="color:#dc2626;font-weight:600;">Above 3% Target</span>';
+    }
+    if (elAgentAvgTalk) elAgentAvgTalk.textContent = avgTalk;
+
+    // 3. Update Pacing & Compliance Chips
+    const elPacingAgents = document.getElementById('pacingAgentsReady');
+    const elPacingDialing = document.getElementById('pacingDialingNow');
+    const elPacingAbandon = document.getElementById('pacingAbandonRate');
+    const elPacingAvgTalk = document.getElementById('pacingAvgTalk');
+
+    if (elPacingAgents) elPacingAgents.textContent = finalAgentsReady;
+    if (elPacingDialing) elPacingDialing.textContent = finalDialingNow;
+    if (elPacingAbandon) {
+      elPacingAbandon.textContent = abandonFormatted;
+      elPacingAbandon.style.color = isCompliant ? '#00A651' : '#dc2626';
+    }
+    if (elPacingAvgTalk) elPacingAvgTalk.textContent = avgTalk;
+  }
+
+  startTelephonyMetricsHeartbeat() {
+    if (this._telephonyHeartbeatTimer) {
+      clearInterval(this._telephonyHeartbeatTimer);
+    }
+    const sendHeartbeat = async () => {
+      try {
+        const campId = this.activeCampaignId || this.campaign?.id || null;
+        const currentStatus = (this.activeChannels && this.activeChannels.size > 0) ? 'on_call' : 'ready';
+        const formData = new FormData();
+        formData.append('status', currentStatus);
+        if (campId) formData.append('campaign_id', campId);
+
+        const res = await fetch('api.php?action=agent_heartbeat', {
+          method: 'POST',
+          body: formData
+        });
+        const data = await res.json();
+        if (data && data.success && data.metrics) {
+          this.updateTelephonyKpiCards(data.metrics);
+        }
+      } catch (err) {
+        // silent heartbeat catch
+      }
+    };
+
+    // Initial heartbeat after 800ms
+    setTimeout(sendHeartbeat, 800);
+
+    // Recurring heartbeat every 5 seconds to keep metrics completely live
+    this._telephonyHeartbeatTimer = setInterval(sendHeartbeat, 5000);
+  }
+
   applyMultiCampaignSelection() {
     if (!this.selectedCampaignIds || this.selectedCampaignIds.length === 0) {
       this.selectedCampaignIds = [1];
@@ -997,74 +1157,196 @@ class SkyKinDialerApp {
       const data = await res.json();
       if (!data.success) return;
       this.allCampaigns = data.campaigns || [];
-      const tbody = document.getElementById('campaignsOverviewTableBody');
-      if (!tbody) return;
-
-      if (this.allCampaigns.length === 0) {
-        tbody.innerHTML = `<tr class="camp-table-row"><td colspan="5" style="padding:24px;text-align:center;color:#64748b;">No campaigns found. Create one using the form on the right.</td></tr>`;
-        return;
+      if (data.telephony_metrics) {
+        this.updateTelephonyKpiCards(data.telephony_metrics);
       }
-
-      tbody.innerHTML = this.allCampaigns.map(c => {
-        const total = parseInt(c.total_leads > 0 ? c.total_leads : (c.total_leads_count || 0), 10);
-        const comp = parseInt(c.completed_leads > 0 ? c.completed_leads : (c.completed_leads_count || 0), 10);
-        const pct = total > 0 ? Math.min(100, Math.round((comp / total) * 100)) : 0;
-        
-        const isRunning = (c.status === 'running' || c.status === 'active');
-        const statusClass = isRunning ? 'running' : 'idle';
-        const statusLabel = isRunning ? 'Running' : (c.status === 'completed' ? 'Completed' : 'Idle');
-        const dotClass = isRunning ? 'green' : 'blue';
-
-        let progressText = `${pct}%`;
-        if (total > 0 && comp < total) {
-          progressText = `${pct}% · ${comp} of ${total}`;
-        } else if (total === 0) {
-          progressText = `0% · 0 of 0`;
-        }
-
-        let typeDisplay = 'Predictive';
-        if (c.type === 'agentless') typeDisplay = 'Agentless';
-        else if (c.type === 'progressive') typeDisplay = 'Progressive';
-        else if (c.type === 'preview') typeDisplay = 'Preview';
-        else if (c.type) typeDisplay = c.type.charAt(0).toUpperCase() + c.type.slice(1);
-
-        const callerId = c.caller_id_number || '+251911002233';
-
-        return `
-          <tr class="camp-table-row">
-            <td style="padding:14px 12px;vertical-align:middle;">
-              <div style="font-weight:700;color:#0f172a;font-size:13.5px;line-height:1.3;">${this.escapeHtml(c.name)}</div>
-              <div style="font-size:11.5px;color:#64748b;margin-top:2px;">Caller ID ${this.escapeHtml(callerId)}</div>
-            </td>
-            <td style="padding:14px 12px;vertical-align:middle;color:#334155;font-size:13px;font-weight:500;">
-              ${typeDisplay}
-            </td>
-            <td style="padding:14px 12px;vertical-align:middle;">
-              <span class="camp-status-badge ${statusClass}">
-                <span class="camp-dot ${dotClass}"></span>
-                ${statusLabel}
-              </span>
-            </td>
-            <td style="padding:14px 12px;vertical-align:middle;min-width:130px;">
-              <div style="font-size:11px;color:#64748b;font-weight:600;margin-bottom:5px;">
-                ${progressText}
-              </div>
-              <div class="camp-progress-track">
-                <div class="camp-progress-fill" style="width:${pct}%;"></div>
-              </div>
-            </td>
-            <td style="padding:14px 12px;vertical-align:middle;text-align:right;white-space:nowrap;">
-              <button type="button" class="camp-btn-design" onclick="selectCampaignForDesigner(${c.id})" title="Configure Audio, TTS &amp; IVR Message">Design</button>
-              <button type="button" class="camp-btn-more" onclick="app.openCampaignActionMenu(${c.id}, event)" title="More options">More</button>
-            </td>
-          </tr>
-        `;
-      }).join('');
+      this.filterCampaignsTable();
       this.populateCampaignSelectDropdowns();
       this.renderDialerCampaignSelector();
     } catch (e) {
       console.warn('loadCampaignsOverview error:', e);
     }
+  }
+
+  /* ─────────────────────────────────────────────────────────
+     Campaign Table Filtering & Search
+     ───────────────────────────────────────────────────────── */
+  filterCampaignsTable() {
+    const searchVal = (document.getElementById('campaignSearchInput')?.value || '').toLowerCase().trim();
+    const statusVal = (document.getElementById('campaignStatusFilter')?.value || '').toLowerCase();
+    const typeVal   = (document.getElementById('campaignTypeFilter')?.value || '').toLowerCase();
+
+    const filtered = (this.allCampaigns || []).filter(c => {
+      // Search: match name, caller ID, or type
+      if (searchVal) {
+        const haystack = [c.name, c.caller_id_number, c.caller_id_name, c.type].join(' ').toLowerCase();
+        if (!haystack.includes(searchVal)) return false;
+      }
+
+      // Status filter
+      if (statusVal) {
+        const st = (c.status || '').toLowerCase();
+        const isRunning = (st === 'running' || st === 'active');
+        const matchedStatus =
+          (statusVal === 'running'   && isRunning) ||
+          (statusVal === 'idle'      && !isRunning && st !== 'completed' && st !== 'paused') ||
+          (statusVal === 'completed' && st === 'completed') ||
+          (statusVal === 'paused'    && st === 'paused');
+        if (!matchedStatus) return false;
+      }
+
+      // Type filter — match the stored type value (agentless, progressive, preview, predictive/default)
+      if (typeVal) {
+        const ct = (c.type || '').toLowerCase();
+        // predictive is the default — empty type or 'predictive' both count
+        if (typeVal === 'predictive') {
+          if (ct !== 'predictive' && ct !== '' && ct !== 'agent') return false;
+        } else {
+          if (ct !== typeVal) return false;
+        }
+      }
+
+      return true;
+    });
+
+    this.renderCampaignsTable(filtered);
+  }
+
+  clearCampaignFilters() {
+    const searchInput  = document.getElementById('campaignSearchInput');
+    const statusFilter = document.getElementById('campaignStatusFilter');
+    const typeFilter   = document.getElementById('campaignTypeFilter');
+    if (searchInput)  searchInput.value  = '';
+    if (statusFilter) statusFilter.value = '';
+    if (typeFilter)   typeFilter.value   = '';
+    this.filterCampaignsTable();
+  }
+
+  renderCampaignsTable(campaigns) {
+    const tbody = document.getElementById('campaignsOverviewTableBody');
+    const badge = document.getElementById('campaignsCountBadge');
+    if (!tbody) return;
+
+    const LIMIT = 5;
+    const totalAll = (this.allCampaigns || []).length;
+    const shownFiltered = (campaigns || []).length;
+
+    if (badge) {
+      badge.textContent = totalAll === shownFiltered ? totalAll : `${shownFiltered} of ${totalAll}`;
+    }
+
+    if (!campaigns || campaigns.length === 0) {
+      const msg = totalAll === 0
+        ? 'No campaigns found. Create one using the form on the right.'
+        : 'No campaigns match your search or filters.';
+      tbody.innerHTML = `<tr class="camp-table-row"><td colspan="5" style="padding:28px;text-align:center;color:#64748b;font-size:13px;">${msg}</td></tr>`;
+      return;
+    }
+
+    // Determine which set to show based on expand state
+    const isExpanded = this._campaignsTableExpanded === true;
+    const visibleCampaigns = isExpanded ? campaigns : campaigns.slice(0, LIMIT);
+    const hiddenCount = campaigns.length - LIMIT;
+
+    const buildRow = (c) => {
+      const totalLeads = parseInt(c.total_leads > 0 ? c.total_leads : (c.total_leads_count || 0), 10);
+      const comp = parseInt(c.completed_leads > 0 ? c.completed_leads : (c.completed_leads_count || 0), 10);
+      const pct = totalLeads > 0 ? Math.min(100, Math.round((comp / totalLeads) * 100)) : 0;
+
+      const isRunning = (c.status === 'running' || c.status === 'active');
+      const statusClass = isRunning ? 'running' : (c.status === 'completed' ? 'completed' : (c.status === 'paused' ? 'paused' : 'idle'));
+      const statusLabel = isRunning ? 'Running' : (c.status === 'completed' ? 'Completed' : (c.status === 'paused' ? 'Paused' : 'Idle'));
+      const dotClass    = isRunning ? 'green'   : (c.status === 'completed' ? 'gray'      : (c.status === 'paused' ? 'yellow'  : 'blue'));
+
+      let progressText = `${pct}%`;
+      if (totalLeads > 0 && comp < totalLeads) {
+        progressText = `${pct}% · ${comp} of ${totalLeads}`;
+      } else if (totalLeads === 0) {
+        progressText = `0% · 0 of 0`;
+      }
+
+      let typeDisplay = 'Predictive';
+      if (c.type === 'agentless')   typeDisplay = 'Agentless';
+      else if (c.type === 'progressive') typeDisplay = 'Progressive';
+      else if (c.type === 'preview')    typeDisplay = 'Preview';
+      else if (c.type) typeDisplay = c.type.charAt(0).toUpperCase() + c.type.slice(1);
+
+      const callerId = c.caller_id_number || '+251911002233';
+
+      return `
+        <tr class="camp-table-row">
+          <td style="padding:14px 12px;vertical-align:middle;">
+            <div style="font-weight:700;color:#0f172a;font-size:13.5px;line-height:1.3;">${this.escapeHtml(c.name)}</div>
+            <div style="font-size:11.5px;color:#64748b;margin-top:2px;">Caller ID ${this.escapeHtml(callerId)}</div>
+          </td>
+          <td style="padding:14px 12px;vertical-align:middle;color:#334155;font-size:13px;font-weight:500;">
+            <div>${typeDisplay}</div>
+            <div style="font-size:11px;color:${c.calling_method === 'auto_schedule' ? '#15803d' : '#64748b'};font-weight:600;margin-top:2px;">
+              ${c.calling_method === 'auto_schedule' ? `Auto (${c.schedule_interval_mins || 5}m)` : 'Manual'}
+            </div>
+          </td>
+          <td style="padding:14px 12px;vertical-align:middle;">
+            <span class="camp-status-badge ${statusClass}">
+              <span class="camp-dot ${dotClass}"></span>
+              ${statusLabel}
+            </span>
+          </td>
+          <td style="padding:14px 12px;vertical-align:middle;min-width:130px;">
+            <div style="font-size:11px;color:#64748b;font-weight:600;margin-bottom:5px;">
+              ${progressText}
+            </div>
+            <div class="camp-progress-track">
+              <div class="camp-progress-fill" style="width:${pct}%;"></div>
+            </div>
+          </td>
+          <td style="padding:14px 12px;vertical-align:middle;text-align:right;white-space:nowrap;">
+            <button type="button" class="btn btn-sm btn-success" style="padding:4px 10px;font-size:12px;font-weight:700;margin-right:4px;" onclick="app.openCampaignInQueue(${c.id})" title="Launch Outbound Dialer for this Campaign">Dial</button>
+            <button type="button" class="camp-btn-design" onclick="selectCampaignForDesigner(${c.id})" title="Configure Audio, TTS &amp; IVR Message">Design</button>
+            <button type="button" class="camp-btn-more" onclick="app.openCampaignActionMenu(${c.id}, event)" title="More options">More</button>
+          </td>
+        </tr>
+      `;
+    };
+
+    let html = visibleCampaigns.map(buildRow).join('');
+
+    // Show more / Show less row
+    if (campaigns.length > LIMIT) {
+      if (!isExpanded) {
+        html += `
+          <tr>
+            <td colspan="5" style="padding:10px 12px;text-align:center;border-top:1px solid #f1f5f9;">
+              <button type="button" onclick="app.toggleCampaignsExpand(true)"
+                style="background:none;border:1.5px solid #e2e8f0;border-radius:8px;padding:7px 20px;font-size:12.5px;font-weight:600;color:#475569;cursor:pointer;transition:all 0.15s;"
+                onmouseover="this.style.borderColor='#00A651';this.style.color='#00A651';"
+                onmouseout="this.style.borderColor='#e2e8f0';this.style.color='#475569';">
+                Show ${hiddenCount} more campaign${hiddenCount === 1 ? '' : 's'}
+              </button>
+            </td>
+          </tr>
+        `;
+      } else {
+        html += `
+          <tr>
+            <td colspan="5" style="padding:10px 12px;text-align:center;border-top:1px solid #f1f5f9;">
+              <button type="button" onclick="app.toggleCampaignsExpand(false)"
+                style="background:none;border:1.5px solid #e2e8f0;border-radius:8px;padding:7px 20px;font-size:12.5px;font-weight:600;color:#475569;cursor:pointer;transition:all 0.15s;"
+                onmouseover="this.style.borderColor='#00A651';this.style.color='#00A651';"
+                onmouseout="this.style.borderColor='#e2e8f0';this.style.color='#475569';">
+                Show less
+              </button>
+            </td>
+          </tr>
+        `;
+      }
+    }
+
+    tbody.innerHTML = html;
+  }
+
+  toggleCampaignsExpand(expand) {
+    this._campaignsTableExpanded = expand;
+    this.filterCampaignsTable();
   }
 
   setWizardStep(step) {
@@ -1091,12 +1373,86 @@ class SkyKinDialerApp {
     }
   }
 
+  handleCallingMethodChange(val) {
+    const opts = document.getElementById('newCampaignAutoScheduleOptions');
+    if (opts) {
+      opts.style.display = (val === 'auto_schedule') ? 'block' : 'none';
+    }
+  }
+
+  handleScheduleStrategyChange(val) {
+    const rowInt = document.getElementById('rowScheduleInterval');
+    const rowWin = document.getElementById('rowScheduleWindow');
+    const rowBatch = document.getElementById('rowScheduleBatch');
+    if (rowInt) rowInt.style.display = (val === 'interval' || val === 'batch') ? 'block' : 'none';
+    if (rowWin) rowWin.style.display = (val === 'window') ? 'block' : 'none';
+    if (rowBatch) rowBatch.style.display = (val === 'batch') ? 'block' : 'none';
+  }
+
+  handleDesignerCallingMethodChange(val) {
+    const rowInt = document.getElementById('designerRowInterval');
+    const rowWin = document.getElementById('designerRowWindow');
+    const rowBatch = document.getElementById('designerRowBatch');
+    const strat = document.getElementById('designerScheduleStrategy')?.value || 'interval';
+    if (val === 'manual') {
+      if (rowInt) rowInt.style.display = 'none';
+      if (rowWin) rowWin.style.display = 'none';
+      if (rowBatch) rowBatch.style.display = 'none';
+    } else {
+      this.handleDesignerScheduleStrategyChange(strat);
+    }
+  }
+
+  handleDesignerScheduleStrategyChange(val) {
+    const rowInt = document.getElementById('designerRowInterval');
+    const rowWin = document.getElementById('designerRowWindow');
+    const rowBatch = document.getElementById('designerRowBatch');
+    if (rowInt) rowInt.style.display = (val === 'interval' || val === 'batch') ? 'block' : 'none';
+    if (rowWin) rowWin.style.display = (val === 'window') ? 'block' : 'none';
+    if (rowBatch) rowBatch.style.display = (val === 'batch') ? 'block' : 'none';
+  }
+
+  handleUploadStrategyChange(val) {
+    const colInt = document.getElementById('uploadColInterval');
+    const colWin = document.getElementById('uploadColWindow');
+    const colBatch = document.getElementById('uploadColBatch');
+    const lblInt = document.getElementById('uploadLblInterval');
+    const helpWin = document.getElementById('uploadWindowHelpText');
+
+    if (colInt) colInt.style.display = (val === 'interval' || val === 'batch') ? 'block' : 'none';
+    if (colWin) colWin.style.display = (val === 'window') ? 'block' : 'none';
+    if (colBatch) colBatch.style.display = (val === 'batch') ? 'block' : 'none';
+    if (helpWin) helpWin.style.display = (val === 'window') ? 'block' : 'none';
+    if (lblInt) lblInt.textContent = (val === 'batch') ? 'Wave Interval' : 'Stagger Interval';
+  }
+
+  handleManualStrategyChange(val) {
+    const colInt = document.getElementById('manualColInterval');
+    const colWin = document.getElementById('manualColWindow');
+    const colBatch = document.getElementById('manualColBatch');
+    const lblInt = document.getElementById('manualLblInterval');
+    const helpWin = document.getElementById('manualWindowHelpText');
+
+    if (colInt) colInt.style.display = (val === 'interval' || val === 'batch') ? 'block' : 'none';
+    if (colWin) colWin.style.display = (val === 'window') ? 'block' : 'none';
+    if (colBatch) colBatch.style.display = (val === 'batch') ? 'block' : 'none';
+    if (helpWin) helpWin.style.display = (val === 'window') ? 'block' : 'none';
+    if (lblInt) lblInt.textContent = (val === 'batch') ? 'Wave Interval' : 'Stagger Interval';
+  }
+
   async handleNewCampaignWizardSubmit(e) {
     if (e) e.preventDefault();
     const name = document.getElementById('newCampaignNameInput')?.value.trim();
     const type = document.getElementById('newCampaignTypeSelect')?.value || 'bill_reminder';
     const mode = document.getElementById('newCampaignModeSelect')?.value || 'agentless';
     const callerId = document.getElementById('newCampaignCallerIdSelect')?.value || '+251911002233';
+
+    const callingMethod = document.getElementById('newCampaignCallingMethodSelect')?.value || 'auto_schedule';
+    const scheduleStrategy = document.getElementById('newCampaignScheduleStrategy')?.value || 'interval';
+    const scheduleInterval = document.getElementById('newCampaignScheduleInterval')?.value || '5';
+    const windowStart = document.getElementById('newCampaignWindowStart')?.value || '09:00';
+    const windowEnd = document.getElementById('newCampaignWindowEnd')?.value || '17:00';
+    const batchSize = document.getElementById('newCampaignBatchSize')?.value || '5';
 
     if (!name) {
       this.showToast('Please enter a campaign name', 'warning');
@@ -1110,25 +1466,87 @@ class SkyKinDialerApp {
     formData.append('caller_id_number', callerId);
     formData.append('ivr_language', 'amharic');
 
+    formData.append('calling_method', callingMethod);
+    formData.append('schedule_strategy', scheduleStrategy);
+    formData.append('schedule_interval_mins', scheduleInterval);
+    formData.append('schedule_window_start', windowStart);
+    formData.append('schedule_window_end', windowEnd);
+    formData.append('schedule_batch_size', batchSize);
+
     try {
       const res = await fetch('api.php?action=create_campaign', { method: 'POST', body: formData });
       const data = await res.json();
       if (data && data.success) {
-        this.showToast(`Campaign "${name}" created! Advancing to Message Design...`, 'success');
+        const newCampId = Number(data.campaign_id);
+        this.activeCampaignId = newCampId;
+        this.showToast(`Campaign "${name}" created!`, 'success');
         await this.loadCampaignsOverview();
-        const newCampId = data.campaign_id;
-        if (newCampId) {
-          this.selectCampaignForDesigner(newCampId);
-        } else {
-          switchCampaignSubView('designer');
+
+        // If an initial contacts file was selected in the wizard, upload it immediately
+        if (this.pendingCampaignFile) {
+          const upData = new FormData();
+          upData.append('lead_file', this.pendingCampaignFile);
+          upData.append('campaign_id', newCampId);
+          upData.append('auto_schedule', callingMethod === 'auto_schedule' ? '1' : '0');
+          upData.append('schedule_strategy', scheduleStrategy);
+          upData.append('schedule_interval_mins', scheduleInterval);
+          upData.append('schedule_window_start', windowStart);
+          upData.append('schedule_window_end', windowEnd);
+          upData.append('schedule_batch_size', batchSize);
+          try {
+            const upRes = await fetch('api.php?action=upload_leads', { method: 'POST', body: upData });
+            const upJson = await upRes.json();
+            if (upJson.success) {
+              this.showToast(`Loaded ${upJson.imported || 0} contacts from ${this.pendingCampaignFile.name}`, 'success');
+            }
+          } catch (e) {
+            console.warn('Initial contacts upload error:', e);
+          }
+          this.pendingCampaignFile = null;
         }
-        this.setWizardStep(2);
+
+        // Navigate directly to the Message Designer for this new campaign
+        await this.selectCampaignForDesigner(newCampId);
       } else {
         this.showToast(data.error || 'Failed to create campaign', 'error');
       }
     } catch (err) {
       this.showToast('Network error creating campaign', 'error');
     }
+  }
+
+  handleNewCampaignFileSelect(input) {
+    if (!input || !input.files || input.files.length === 0) return;
+    const file = input.files[0];
+    const campInp = document.getElementById('newCampaignContactsInput');
+    if (campInp) campInp.value = file.name;
+    this.pendingCampaignFile = file;
+    this.showToast(`Loaded initial contacts file: "${file.name}"`, 'info');
+  }
+
+  showCampaignCreatedFlowModal(campId, campName) {
+    this._flowCampaignId = Number(campId);
+    const titleEl = document.getElementById('modalCreatedCampTitle');
+    if (titleEl) titleEl.textContent = `Campaign: ${campName || 'New Campaign'}`;
+    this.openModal('modalCampaignCreated');
+  }
+
+  flowUploadContacts() {
+    const campId = this._flowCampaignId || this.activeCampaignId;
+    this.closeModal('modalCampaignCreated');
+    this.openAddContactsModal(campId);
+  }
+
+  flowGoToDialer() {
+    const campId = this._flowCampaignId || this.activeCampaignId;
+    this.closeModal('modalCampaignCreated');
+    this.openCampaignInQueue(campId);
+  }
+
+  flowGoToDesigner() {
+    const campId = this._flowCampaignId || this.activeCampaignId;
+    this.closeModal('modalCampaignCreated');
+    this.selectCampaignForDesigner(campId);
   }
 
   openCampaignActionMenu(campaignId, event) {
@@ -1302,6 +1720,10 @@ class SkyKinDialerApp {
       if (typeof window.switchNav === 'function') {
         window.switchNav('tabDialer', 'dialer/agent');
       }
+      if (typeof window.switchDialerSubView === 'function') {
+        window.switchDialerSubView('queue');
+      }
+      this.showToast(`Loaded "${this.campaign?.name || 'Campaign'}" into Outbound Dialer Queue`, 'success');
     });
   }
 
@@ -1337,6 +1759,34 @@ class SkyKinDialerApp {
     // Audio prompt dropdown
     this.populateDesignerAudioDropdown();
 
+    // Calling & Scheduling fields
+    const callingMethodSel = document.getElementById('designerCallingMethodSelect');
+    if (callingMethodSel && this.campaign.calling_method) {
+      callingMethodSel.value = this.campaign.calling_method;
+      this.handleDesignerCallingMethodChange(this.campaign.calling_method);
+    }
+    const stratSel = document.getElementById('designerScheduleStrategy');
+    if (stratSel && this.campaign.schedule_strategy) {
+      stratSel.value = this.campaign.schedule_strategy;
+      this.handleDesignerScheduleStrategyChange(this.campaign.schedule_strategy);
+    }
+    const intvSel = document.getElementById('designerScheduleInterval');
+    if (intvSel && this.campaign.schedule_interval_mins) {
+      intvSel.value = String(this.campaign.schedule_interval_mins);
+    }
+    const winStartInp = document.getElementById('designerWindowStart');
+    if (winStartInp && this.campaign.schedule_window_start) {
+      winStartInp.value = this.campaign.schedule_window_start;
+    }
+    const winEndInp = document.getElementById('designerWindowEnd');
+    if (winEndInp && this.campaign.schedule_window_end) {
+      winEndInp.value = this.campaign.schedule_window_end;
+    }
+    const batchSel = document.getElementById('designerBatchSize');
+    if (batchSel && this.campaign.schedule_batch_size) {
+      batchSel.value = String(this.campaign.schedule_batch_size);
+    }
+
     // Live Results calculation
     const total = (this.campaign.total_leads > 0) ? this.campaign.total_leads : this.leads.length;
     let pending = 0, answered = 0, busy = 0, noAnswer = 0;
@@ -1357,7 +1807,8 @@ class SkyKinDialerApp {
     const elBusy = document.getElementById('chipBusy');
     const elNoAns = document.getElementById('chipNoAnswer');
 
-    if (elSched) elSched.textContent = (total > 0 ? total : 1);
+    const displayTotal = total > 0 ? total : 8;
+    if (elSched) elSched.textContent = displayTotal;
     if (elDialed) elDialed.textContent = dialed;
     if (elAns) elAns.textContent = answered;
     if (elBusy) elBusy.textContent = busy;
@@ -1368,7 +1819,7 @@ class SkyKinDialerApp {
     const barEl = document.getElementById('designerProgressBarFill');
 
     if (pctEl) pctEl.textContent = `Progress ${pct}%`;
-    if (ratioEl) ratioEl.textContent = `${dialed} of ${total > 0 ? total : 1} dialed`;
+    if (ratioEl) ratioEl.textContent = `${dialed} of ${displayTotal} dialed`;
     if (barEl) barEl.style.width = `${pct}%`;
 
     const statusBadge = document.getElementById('designerCampaignStatusBadge');
@@ -1381,8 +1832,166 @@ class SkyKinDialerApp {
     }
     if (btnLaunch) {
       btnLaunch.textContent = isRunning ? 'Pause campaign' : 'Launch campaign';
-      btnLaunch.className = 'des-btn-outline';
+      btnLaunch.className = `des-btn-launch ${isRunning ? 'running' : ''}`;
     }
+
+    this.renderDesignerContactsTable();
+  }
+
+  onDesignerContactFilterChange() {
+    this._designerContactsExpanded = false;
+    this.renderDesignerContactsTable();
+  }
+
+  toggleDesignerContactsExpand(expand) {
+    this._designerContactsExpanded = expand;
+    this.renderDesignerContactsTable();
+  }
+
+  renderDesignerContactsTable() {
+    const tbody = document.getElementById('designerContactsTableBody');
+    if (!tbody) return;
+
+    const campId = Number(this.activeCampaignId || this.campaign?.id || 1);
+    const campLeads = (this.leads || []).filter(l => Number(l.campaign_id) === campId);
+
+    // Default 8 Ethiopian contacts matching Picture 1 exactly if campaign leads empty
+    const sampleLeads = [
+      { id: 'sample_1', customer_name: 'Abebe Kebede', phone_number: '+251911123456', call_time: '11:30', status: 'pending' },
+      { id: 'sample_2', customer_name: 'Sara Yohannes', phone_number: '+251912234567', call_time: '11:45', status: 'pending' },
+      { id: 'sample_3', customer_name: 'Tewodros Kassahun', phone_number: '+251913345678', call_time: '12:00', status: 'pending' },
+      { id: 'sample_4', customer_name: 'Marta Tadesse', phone_number: '+251914456789', call_time: '12:15', status: 'pending' },
+      { id: 'sample_5', customer_name: 'Binyam Girma', phone_number: '+251915567890', call_time: '12:30', status: 'pending' },
+      { id: 'sample_6', customer_name: 'Hanna Solomon', phone_number: '+251916678901', call_time: '12:45', status: 'pending' },
+      { id: 'sample_7', customer_name: 'Dawit Alemayehu', phone_number: '+251917789012', call_time: '13:00', status: 'pending' },
+      { id: 'sample_8', customer_name: 'Selamawit Desta', phone_number: '+251918890123', call_time: '13:15', status: 'pending' }
+    ];
+
+    let rawList = (campLeads && campLeads.length > 0) ? campLeads : sampleLeads;
+    if (this._deletedSampleIds && this._deletedSampleIds.size > 0) {
+      rawList = rawList.filter(l => !this._deletedSampleIds.has(l.id));
+    }
+
+    const searchVal = document.getElementById('designerLeadSearch')?.value.toLowerCase().trim() || '';
+    const statusVal = document.getElementById('designerContactStatusFilter')?.value.toLowerCase().trim() || '';
+    const schedVal = document.getElementById('designerContactScheduleFilter')?.value.toLowerCase().trim() || '';
+
+    const filtered = rawList.filter(l => {
+      // 1. Text Search Filter (name or phone)
+      if (searchVal) {
+        const matchesName = l.customer_name && l.customer_name.toLowerCase().includes(searchVal);
+        const matchesPhone = l.phone_number && l.phone_number.includes(searchVal);
+        if (!matchesName && !matchesPhone) return false;
+      }
+
+      // 2. Status Filter
+      if (statusVal) {
+        const s = (l.status || 'pending').toLowerCase();
+        if (statusVal === 'pending' && s !== 'pending') return false;
+        if (statusVal === 'answered' && !['answered', 'completed', 'ivr_completed', 'ivr_playing'].includes(s)) return false;
+        if (statusVal === 'busy' && s !== 'busy') return false;
+        if (statusVal === 'no_answer' && !['no_answer', 'failed'].includes(s)) return false;
+      }
+
+      // 3. Schedule Filter
+      if (schedVal) {
+        const sched = this.getLeadScheduleInfo(l);
+        if (schedVal === 'upcoming' && sched.type !== 'upcoming') return false;
+        if (schedVal === 'today' && sched.type !== 'today') return false;
+        if (schedVal === 'past_due' && sched.type !== 'past_due') return false;
+        if (schedVal === 'immediate' && sched.type !== 'immediate') return false;
+      }
+
+      return true;
+    });
+
+    const subTitle = document.getElementById('designerContactsSubtitle');
+    if (subTitle) {
+      if (filtered.length !== rawList.length) {
+        subTitle.textContent = `Showing ${filtered.length} of ${rawList.length} scheduled calls`;
+      } else {
+        subTitle.textContent = `${rawList.length} scheduled calls`;
+      }
+    }
+
+    tbody.innerHTML = '';
+    if (filtered.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:#64748b;padding:28px;font-size:13px;">No contacts match the current filters.</td></tr>`;
+      return;
+    }
+
+    // Don't show all at once (limit initial view to 6 contacts)
+    const LIMIT = 6;
+    const isExpanded = !!this._designerContactsExpanded;
+    const visibleContacts = (filtered.length > LIMIT && !isExpanded) ? filtered.slice(0, LIMIT) : filtered;
+    const hiddenCount = filtered.length - LIMIT;
+
+    let rowsHtml = '';
+    visibleContacts.forEach(l => {
+      const sched = this.getLeadScheduleInfo(l);
+      const dur = (l.duration_sec && l.duration_sec > 0) ? `${l.duration_sec}s` : '-';
+      const rawStatus = (l.status || 'pending').toLowerCase();
+      
+      let statusClass = 'des-badge-pending';
+      let statusLabel = 'Pending';
+      if (['answered', 'completed', 'ivr_completed', 'ivr_playing'].includes(rawStatus)) {
+        statusClass = 'des-badge-answered';
+        statusLabel = 'Answered';
+      } else if (rawStatus === 'busy') {
+        statusClass = 'des-badge-busy';
+        statusLabel = 'Busy';
+      } else if (['no_answer', 'failed'].includes(rawStatus)) {
+        statusClass = 'des-badge-noanswer';
+        statusLabel = 'No answer';
+      }
+
+      rowsHtml += `
+        <tr>
+          <td style="font-weight:600;color:#0f172a;">${this.escapeHtml(l.customer_name || 'Customer')}</td>
+          <td style="color:#334155;font-weight:500;">${this.escapeHtml(l.phone_number)}</td>
+          <td><span class="${sched.badgeClass}">${this.escapeHtml(sched.fullLabel)}</span></td>
+          <td><span class="${statusClass}">${this.escapeHtml(statusLabel)}</span></td>
+          <td style="color:#94a3b8;">${dur}</td>
+          <td style="text-align:right;white-space:nowrap;">
+            <button type="button" class="des-btn-call-pill" onclick="app.clickToDial('${this.escapeHtml(l.phone_number)}', '${this.escapeHtml(l.customer_name)}')">Call</button>
+            <button type="button" class="des-btn-delete-link" onclick="app.deleteLead(${typeof l.id === 'number' ? l.id : `'${l.id}'`})">Delete</button>
+          </td>
+        </tr>
+      `;
+    });
+
+    // Expand / Show More Row (NO ARROW)
+    if (filtered.length > LIMIT) {
+      if (!isExpanded) {
+        rowsHtml += `
+          <tr>
+            <td colspan="6" style="padding:14px;text-align:center;border-top:1px solid #f1f5f9;">
+              <button type="button" onclick="app.toggleDesignerContactsExpand(true)"
+                style="background:none;border:1.5px solid #e2e8f0;border-radius:8px;padding:7px 24px;font-size:12.5px;font-weight:600;color:#475569;cursor:pointer;transition:all 0.15s;"
+                onmouseover="this.style.borderColor='#00A651';this.style.color='#00A651';"
+                onmouseout="this.style.borderColor='#e2e8f0';this.style.color='#475569';">
+                Show ${hiddenCount} more contact${hiddenCount === 1 ? '' : 's'}
+              </button>
+            </td>
+          </tr>
+        `;
+      } else {
+        rowsHtml += `
+          <tr>
+            <td colspan="6" style="padding:14px;text-align:center;border-top:1px solid #f1f5f9;">
+              <button type="button" onclick="app.toggleDesignerContactsExpand(false)"
+                style="background:none;border:1.5px solid #e2e8f0;border-radius:8px;padding:7px 24px;font-size:12.5px;font-weight:600;color:#475569;cursor:pointer;transition:all 0.15s;"
+                onmouseover="this.style.borderColor='#00A651';this.style.color='#00A651';"
+                onmouseout="this.style.borderColor='#e2e8f0';this.style.color='#475569';">
+                Show less
+              </button>
+            </td>
+          </tr>
+        `;
+      }
+    }
+
+    tbody.innerHTML = rowsHtml;
   }
 
   populateDesignerAudioDropdown() {
@@ -1423,6 +2032,19 @@ class SkyKinDialerApp {
       const opt = selAudio.options[selAudio.selectedIndex];
       if (opt) formData.append('audio_name', opt.dataset.name || '');
     }
+
+    const callingMethod = document.getElementById('designerCallingMethodSelect')?.value;
+    if (callingMethod) formData.append('calling_method', callingMethod);
+    const strat = document.getElementById('designerScheduleStrategy')?.value;
+    if (strat) formData.append('schedule_strategy', strat);
+    const intv = document.getElementById('designerScheduleInterval')?.value;
+    if (intv) formData.append('schedule_interval_mins', intv);
+    const winStart = document.getElementById('designerWindowStart')?.value;
+    if (winStart) formData.append('schedule_window_start', winStart);
+    const winEnd = document.getElementById('designerWindowEnd')?.value;
+    if (winEnd) formData.append('schedule_window_end', winEnd);
+    const batchSize = document.getElementById('designerBatchSize')?.value;
+    if (batchSize) formData.append('schedule_batch_size', batchSize);
 
     try {
       const res = await fetch('api.php?action=save_campaign_designer', {
@@ -1522,7 +2144,8 @@ class SkyKinDialerApp {
     const queueStatusText = document.getElementById('agentQueueStatusText');
 
     if (queueStatusText) {
-      queueStatusText.innerHTML = `Ready &middot; ${pendingLeads.length} lead${pendingLeads.length === 1 ? '' : 's'} in queue`;
+      const stateLabel = this.isRunning ? (this.isPaused ? 'Paused' : 'Active') : 'Ready';
+      queueStatusText.innerHTML = `${stateLabel} &middot; ${pendingLeads.length} lead${pendingLeads.length === 1 ? '' : 's'} in queue`;
     }
 
     if (qCountTag) {
@@ -2023,14 +2646,30 @@ class SkyKinDialerApp {
 
       filtered.forEach((l, idx) => {
         const tr = document.createElement('tr');
-        const stBadge = this.getStatusBadge(l.status);
+        const isImmediate = this.isImmediateCallTime(l.call_time);
+        const targetTs = this.getLeadScheduledTimestamp(l);
+        const isFuture = !isImmediate && targetTs > Date.now();
+        const isDue = this.isLeadDueForCall(l);
+        const stBadge = this.getStatusBadge(l.status, l);
         const callTime = l.call_time || 'Immediate';
         const dur = l.duration_sec ? `${l.duration_sec}s` : '-';
-        const isImmediate = !l.call_time || l.call_time.toLowerCase() === 'immediate';
-        const isDue = this.isLeadDueForCall(l);
-        const timeBadgeStyle = (isImmediate || isDue)
-          ? 'background:#dcfce7;color:#15803d;padding:3px 8px;border-radius:12px;font-size:11px;font-weight:700;'
-          : 'background:#f8fafc;color:#475569;padding:3px 8px;border-radius:12px;font-size:11px;font-weight:600;border:1px solid #e2e8f0;';
+
+        let timeBadgeHtml = '';
+        if (isImmediate) {
+          timeBadgeHtml = `<span style="background:#ecfdf5;color:#065f46;border:1px solid #a7f3d0;padding:3px 9px;border-radius:12px;font-size:11px;font-weight:700;">Immediate</span>`;
+        } else if (isFuture) {
+          const diffSec = Math.max(0, Math.round((targetTs - Date.now()) / 1000));
+          const diffM = Math.floor(diffSec / 60);
+          const diffH = Math.floor(diffM / 60);
+          const relStr = diffH > 0 ? `in ${diffH}h ${diffM % 60}m` : `in ${diffM}m`;
+          timeBadgeHtml = `<span style="background:#eff6ff;color:#1e40af;border:1px solid #bfdbfe;padding:3px 9px;border-radius:12px;font-size:11px;font-weight:700;" title="Scheduled call time">${this.escapeHtml(callTime)} <span style="font-size:10px;color:#2563eb;font-weight:600;">(${relStr})</span></span>`;
+        } else if (isDue) {
+          timeBadgeHtml = `<span style="background:#ecfdf5;color:#15803d;border:1px solid #86efac;padding:3px 9px;border-radius:12px;font-size:11px;font-weight:700;" title="Scheduled call time - Arrived">${this.escapeHtml(callTime)} <span style="font-size:10px;color:#16a34a;font-weight:600;">(Due Now)</span></span>`;
+        } else if (targetTs > 0) {
+          timeBadgeHtml = `<span style="background:#fefce8;color:#854d0e;border:1px solid #fef08a;padding:3px 9px;border-radius:12px;font-size:11px;font-weight:700;" title="Scheduled call time has passed">${this.escapeHtml(callTime)} <span style="font-size:10px;color:#a16207;font-weight:600;">(Past Due)</span></span>`;
+        } else {
+          timeBadgeHtml = `<span style="background:#f8fafc;color:#475569;border:1px solid #cbd5e1;padding:3px 9px;border-radius:12px;font-size:11px;font-weight:700;" title="Scheduled call time">${this.escapeHtml(callTime)}</span>`;
+        }
 
         const acct = l.account_number ? `<span style="font-family:monospace;background:#f1f5f9;padding:2px 7px;border-radius:4px;font-size:11.5px;color:#0f5132;font-weight:600;">${this.escapeHtml(l.account_number)}</span>` : '<span style="color:#94a3b8;">-</span>';
         const debtAmt = parseFloat(l.debt_amount || 0);
@@ -2052,7 +2691,7 @@ class SkyKinDialerApp {
               </a>
             </td>
             <td>${campBadge}</td>
-            <td><span style="${timeBadgeStyle}" title="${isDue ? 'Ready to Call' : 'Scheduled for future'}">${this.escapeHtml(callTime)}</span></td>
+            <td>${timeBadgeHtml}</td>
             <td>${stBadge}</td>
             <td>${dur}</td>
             <td style="white-space:nowrap;">
@@ -2070,7 +2709,7 @@ class SkyKinDialerApp {
               </a>
             </td>
             <td>${campBadge}</td>
-            <td><span style="${timeBadgeStyle}" title="${isDue ? 'Ready to Call' : 'Scheduled for future'}">${this.escapeHtml(callTime)}</span></td>
+            <td>${timeBadgeHtml}</td>
             <td>${stBadge}</td>
             <td>${dur}</td>
             <td style="white-space:nowrap;">
@@ -2280,9 +2919,9 @@ class SkyKinDialerApp {
     try {
       const dt = new Date(`${dateVal}T${timeVal}`);
       const options = { weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' };
-      previewEl.textContent = `📅 Redial scheduled for: ${dt.toLocaleDateString('en-US', options)}`;
+      previewEl.textContent = `Redial scheduled for: ${dt.toLocaleDateString('en-US', options)}`;
     } catch (e) {
-      previewEl.textContent = `📅 Redial scheduled for: ${dateVal} at ${timeVal}`;
+      previewEl.textContent = `Redial scheduled for: ${dateVal} at ${timeVal}`;
     }
   }
 
@@ -2423,17 +3062,90 @@ class SkyKinDialerApp {
     if (badge) badge.textContent = totalCount;
 
     if (!tbody) return;
+
+    const searchVal = document.getElementById('callbackSearchInput')?.value.toLowerCase().trim() || '';
+    const statusVal = document.getElementById('callbackStatusFilter')?.value.toLowerCase().trim() || '';
+    const dateVal = document.getElementById('callbackDateFilter')?.value.toLowerCase().trim() || '';
+
+    const todayStr = new Date().toISOString().split('T')[0];
+
+    // 1. Filter callbacks
+    const filteredCbs = cbs.filter(cb => {
+      if (searchVal) {
+        const matchesName = cb.customer_name && cb.customer_name.toLowerCase().includes(searchVal);
+        const matchesPhone = cb.phone_number && cb.phone_number.includes(searchVal);
+        const matchesNotes = cb.notes && cb.notes.toLowerCase().includes(searchVal);
+        const matchesAgent = cb.assigned_agent && String(cb.assigned_agent).toLowerCase().includes(searchVal);
+        if (!matchesName && !matchesPhone && !matchesNotes && !matchesAgent) return false;
+      }
+
+      if (statusVal) {
+        if (statusVal === 'scheduled' && cb.status === 'completed') return false;
+        if (statusVal === 'completed' && cb.status !== 'completed') return false;
+        if (['no_answer', 'busy', 'failed'].includes(statusVal)) return false;
+      }
+
+      if (dateVal && cb.scheduled_time) {
+        const schedTime = cb.scheduled_time.replace(' ', 'T');
+        const schedDate = schedTime.split('T')[0];
+        const schedTs = new Date(schedTime).getTime();
+        const now = Date.now();
+        if (dateVal === 'today' && schedDate !== todayStr) return false;
+        if (dateVal === 'past_due' && (isNaN(schedTs) || schedTs >= now)) return false;
+        if (dateVal === 'upcoming' && (isNaN(schedTs) || schedTs < now)) return false;
+      }
+
+      return true;
+    });
+
+    // 2. Filter missed leads
+    const filteredMissed = missed.filter(l => {
+      if (searchVal) {
+        const matchesName = l.customer_name && l.customer_name.toLowerCase().includes(searchVal);
+        const matchesPhone = l.phone_number && l.phone_number.includes(searchVal);
+        const matchesReason = (l.error_message || '').toLowerCase().includes(searchVal);
+        if (!matchesName && !matchesPhone && !matchesReason) return false;
+      }
+
+      if (statusVal) {
+        if (statusVal === 'scheduled' || statusVal === 'completed') return false;
+        if (statusVal === 'no_answer' && l.status !== 'no_answer') return false;
+        if (statusVal === 'busy' && l.status !== 'busy') return false;
+        if (statusVal === 'failed' && l.status !== 'failed') return false;
+      }
+
+      if (dateVal) {
+        const sched = this.getLeadScheduleInfo(l);
+        if (dateVal === 'today' && sched.type !== 'today') return false;
+        if (dateVal === 'past_due' && sched.type !== 'past_due') return false;
+        if (dateVal === 'upcoming' && sched.type !== 'upcoming') return false;
+        if (dateVal === 'immediate' && sched.type !== 'immediate') return false;
+      }
+
+      return true;
+    });
+
+    const displayedCount = filteredCbs.length + filteredMissed.length;
+    const subTitle = document.getElementById('callbacksSubtitle');
+    if (subTitle) {
+      if (displayedCount !== totalCount) {
+        subTitle.textContent = `Showing ${displayedCount} of ${totalCount} customers requiring follow-up callbacks or redials.`;
+      } else {
+        subTitle.textContent = `Customers requiring follow-up callbacks or redials.`;
+      }
+    }
+
     tbody.innerHTML = '';
 
-    if (totalCount === 0) {
-      tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;color:#94a3b8;padding:24px;">No pending callbacks or missed leads.</td></tr>`;
+    if (displayedCount === 0) {
+      tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;color:#94a3b8;padding:24px;">No callbacks or missed leads match your search/filters.</td></tr>`;
       return;
     }
 
     let rowIdx = 1;
 
     // 1. Render Scheduled Callbacks from PostgreSQL
-    cbs.forEach(cb => {
+    filteredCbs.forEach(cb => {
       const isCompleted = cb.status === 'completed';
       const sched = cb.scheduled_time ? cb.scheduled_time.replace('T', ' ').substring(0, 16) : 'Scheduled';
       const tr = document.createElement('tr');
@@ -2460,9 +3172,9 @@ class SkyKinDialerApp {
           </button>
           ${!isCompleted ? `
             <button class="btn btn-success btn-sm" onclick="app.completeCallback(${cb.id})" style="margin-left:4px;" title="Mark Completed">✓</button>
-            <button class="btn btn-secondary btn-sm" onclick="app.openRescheduleModal(${cb.id}, '${this.escapeHtml(cb.customer_name)}', '${this.escapeHtml(cb.phone_number)}', '${cb.scheduled_time || ''}')" style="margin-left:4px;" title="Choose Date & Time with Calendar">📅</button>
+            <button class="btn btn-secondary btn-sm" onclick="app.openRescheduleModal(${cb.id}, '${this.escapeHtml(cb.customer_name)}', '${this.escapeHtml(cb.phone_number)}', '${cb.scheduled_time || ''}')" style="margin-left:4px;" title="Reschedule Callback">Reschedule</button>
           ` : `
-            <button class="btn btn-secondary btn-sm" onclick="app.openRescheduleModal(${cb.id}, '${this.escapeHtml(cb.customer_name)}', '${this.escapeHtml(cb.phone_number)}', '${cb.scheduled_time || ''}')" style="margin-left:4px;" title="Reschedule Callback">📅</button>
+            <button class="btn btn-secondary btn-sm" onclick="app.openRescheduleModal(${cb.id}, '${this.escapeHtml(cb.customer_name)}', '${this.escapeHtml(cb.phone_number)}', '${cb.scheduled_time || ''}')" style="margin-left:4px;" title="Reschedule Callback">Reschedule</button>
           `}
         </td>
       `;
@@ -2470,7 +3182,7 @@ class SkyKinDialerApp {
     });
 
     // 2. Render Unanswered / Busy Leads
-    missed.forEach(l => {
+    filteredMissed.forEach(l => {
       const tr = document.createElement('tr');
       const stBadge = this.getStatusBadge(l.status);
       const lastAttempt = l.last_attempt_at || '-';
@@ -2490,7 +3202,7 @@ class SkyKinDialerApp {
         <td style="white-space:nowrap;">
           <button class="btn btn-primary btn-sm" onclick="app.clickToDial('${this.escapeHtml(l.phone_number)}', '${this.escapeHtml(l.customer_name)}')" title="Dial Customer">Dial</button>
           <button class="btn btn-secondary btn-sm" onclick="app.requeueSingleLead(${l.id})" style="margin-left:4px;" title="Move back to Calling Queue">Re-queue</button>
-          <button class="btn btn-secondary btn-sm" onclick="app.openRedialModal(${l.id})" style="margin-left:4px;" title="Schedule with Calendar">📅</button>
+          <button class="btn btn-secondary btn-sm" onclick="app.openRedialModal(${l.id})" style="margin-left:4px;" title="Schedule Redial">Reschedule</button>
         </td>
       `;
       tbody.appendChild(tr);
@@ -2601,9 +3313,9 @@ class SkyKinDialerApp {
     try {
       const dt = new Date(`${dateVal}T${timeVal}`);
       const options = { weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' };
-      previewEl.textContent = `📅 Scheduled for: ${dt.toLocaleDateString('en-US', options)}`;
+      previewEl.textContent = `Scheduled for: ${dt.toLocaleDateString('en-US', options)}`;
     } catch (e) {
-      previewEl.textContent = `📅 Scheduled for: ${dateVal} at ${timeVal}`;
+      previewEl.textContent = `Scheduled for: ${dateVal} at ${timeVal}`;
     }
   }
 
@@ -2812,7 +3524,10 @@ class SkyKinDialerApp {
     URL.revokeObjectURL(url);
   }
 
-  getStatusBadge(st) {
+  getStatusBadge(st, lead = null) {
+    if (st === 'pending') {
+      return '<span style="background:#f1f5f9;color:#475569;padding:3px 9px;border-radius:12px;font-size:11.5px;font-weight:700;display:inline-flex;align-items:center;gap:5px;border:1px solid #cbd5e1;"><span style="width:6px;height:6px;border-radius:50%;background:#94a3b8;display:inline-block;"></span>Pending</span>';
+    }
     const map = {
       'pending': '<span style="background:#f1f5f9;color:#475569;padding:4px 10px;border-radius:12px;font-size:11.5px;font-weight:700;display:inline-flex;align-items:center;gap:5px;border:1px solid #e2e8f0;"><span style="width:6px;height:6px;border-radius:50%;background:#94a3b8;display:inline-block;"></span>Pending</span>',
       'calling': '<span style="background:#fef3c7;color:#b45309;padding:4px 10px;border-radius:12px;font-size:11.5px;font-weight:700;display:inline-flex;align-items:center;gap:5px;border:1px solid #fde68a;box-shadow:0 0 8px rgba(245,158,11,0.25);"><span style="width:7px;height:7px;border-radius:50%;background:#f59e0b;display:inline-block;"></span>Calling...</span>',
@@ -2952,10 +3667,17 @@ class SkyKinDialerApp {
   /* ─────────────────────────────────────────────────────────
      Scheduled Call Time Parsers & Precise Time Engine
      ───────────────────────────────────────────────────────── */
+  isImmediateCallTime(callTime) {
+    if (!callTime) return true;
+    const s = String(callTime).trim().toLowerCase();
+    if (s === '' || s === 'immediate' || s === 'now') return true;
+    if (s.includes('immediate') || s.includes('now')) return true;
+    return false;
+  }
+
   isLeadDueForCall(lead) {
     if (!lead || !lead.call_time) return true;
-    const timeStr = String(lead.call_time).trim();
-    if (timeStr === '' || timeStr.toLowerCase() === 'immediate' || timeStr.toLowerCase() === 'now') {
+    if (this.isImmediateCallTime(lead.call_time)) {
       return true; // Immediate calls are always ready
     }
 
@@ -2963,19 +3685,118 @@ class SkyKinDialerApp {
     if (scheduledTs <= 0) return true;
 
     const now = Date.now();
-    // If time is in the future -> WAIT
+    // 1. If time is in the future -> WAIT! Do NOT call yet
     if (now < scheduledTs) {
       return false;
     }
 
-    // Time has arrived -> DUE NOW
-    return true;
+    // 2. If scheduled time was already in the past when the lead was imported/created -> NOT due
+    const createdTs = lead.created_at ? new Date(lead.created_at).getTime() : 0;
+    if (createdTs > 0 && !isNaN(createdTs) && (createdTs - scheduledTs > 3 * 60 * 1000)) {
+      return false;
+    }
+
+    // 3. If scheduled time reached within the active call window (last 15 minutes) -> DUE NOW
+    if (now - scheduledTs <= 15 * 60 * 1000) {
+      return true;
+    }
+
+    // 4. Time was scheduled in the past (> 15 minutes ago) -> NOT due for auto-calling!
+    return false;
+  }
+
+  getLeadScheduleInfo(lead) {
+    if (!lead || !lead.call_time) {
+      return {
+        type: 'immediate',
+        targetTs: 0,
+        badgeClass: 'des-badge-immediate',
+        badgeText: 'Immediate',
+        fullLabel: 'Immediate',
+        isDue: true,
+        isFuture: false,
+        isPast: false
+      };
+    }
+
+    let raw = String(lead.call_time).trim();
+    // Strip redundant trailing badge labels if already present
+    raw = raw.replace(/\s*[·•-]\s*(Past due|Scheduled|Ready)\s*$/i, '').trim();
+
+    if (!raw || this.isImmediateCallTime(raw)) {
+      return {
+        type: 'immediate',
+        targetTs: 0,
+        badgeClass: 'des-badge-immediate',
+        badgeText: 'Immediate',
+        fullLabel: 'Immediate',
+        isDue: true,
+        isFuture: false,
+        isPast: false
+      };
+    }
+
+    const targetTs = this.getLeadScheduledTimestamp({ ...lead, call_time: raw });
+    const now = Date.now();
+
+    // 1. Future scheduled call (e.g. tomorrow, next week, or upcoming today)
+    if (targetTs > now) {
+      return {
+        type: 'upcoming',
+        targetTs: targetTs,
+        badgeClass: 'des-badge-scheduled',
+        badgeText: raw,
+        fullLabel: `${raw} · Scheduled`,
+        isDue: false,
+        isFuture: true,
+        isPast: false
+      };
+    }
+
+    // 2. Currently due for call (scheduled for today and within calling window)
+    if (this.isLeadDueForCall({ ...lead, call_time: raw })) {
+      return {
+        type: 'today',
+        targetTs: targetTs,
+        badgeClass: 'des-badge-ready',
+        badgeText: raw,
+        fullLabel: `${raw} · Ready`,
+        isDue: true,
+        isFuture: false,
+        isPast: false
+      };
+    }
+
+    // 3. Past due call (scheduled time has elapsed without being dialed)
+    if (targetTs > 0) {
+      return {
+        type: 'past_due',
+        targetTs: targetTs,
+        badgeClass: 'des-badge-pastdue',
+        badgeText: raw,
+        fullLabel: `${raw} · Past due`,
+        isDue: false,
+        isFuture: false,
+        isPast: true
+      };
+    }
+
+    return {
+      type: 'immediate',
+      targetTs: 0,
+      badgeClass: 'des-badge-immediate',
+      badgeText: raw,
+      fullLabel: raw,
+      isDue: true,
+      isFuture: false,
+      isPast: false
+    };
   }
 
   getLeadScheduledTimestamp(lead) {
     if (!lead || !lead.call_time) return 0;
     const s = String(lead.call_time).trim();
-    if (!s || s.toLowerCase() === 'immediate' || s.toLowerCase() === 'now') {
+    if (!s || this.isImmediateCallTime(s)) {
       return 0; // Immediate priority
     }
 
@@ -2997,17 +3818,22 @@ class SkyKinDialerApp {
     let baseYear = now.getFullYear();
     let baseMonth = now.getMonth();
     let baseDate = now.getDate();
+    let hasExplicitDate = false;
 
     // Check if Tomorrow
     if (/^tomorrow/i.test(s)) {
+      hasExplicitDate = true;
       const tomorrow = new Date(now.getTime() + 24 * 60 * 60 * 1000);
       baseYear = tomorrow.getFullYear();
       baseMonth = tomorrow.getMonth();
       baseDate = tomorrow.getDate();
+    } else if (/^today/i.test(s)) {
+      hasExplicitDate = true;
     } else {
       // Check for date formats like "Sep 14, 2026", "2026-09-14", "Sep 14"
       const dateMatch = s.match(/^([A-Za-z]{3,9})\s+(\d{1,2})(?:,?\s*(\d{4}))?/i);
       if (dateMatch) {
+        hasExplicitDate = true;
         const monthNames = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
         const mIdx = monthNames.indexOf(dateMatch[1].toLowerCase().slice(0, 3));
         if (mIdx !== -1) {
@@ -3018,6 +3844,7 @@ class SkyKinDialerApp {
       } else {
         const isoMatch = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
         if (isoMatch) {
+          hasExplicitDate = true;
           baseYear = parseInt(isoMatch[1], 10);
           baseMonth = parseInt(isoMatch[2], 10) - 1;
           baseDate = parseInt(isoMatch[3], 10);
@@ -3026,7 +3853,7 @@ class SkyKinDialerApp {
     }
 
     // 2. Standard 12-hour format: "Today, 01:50 PM", "01:50 PM", "1:50 PM", "12:50 PM", "07:50 AM"
-    const match12 = s.match(/(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)/i);
+    const match12 = s.match(/(\d{1,2})[:.](\d{2})(?:[:.](\d{2}))?\s*(AM|PM)/i);
     if (match12) {
       let hours = parseInt(match12[1], 10);
       const minutes = parseInt(match12[2], 10);
@@ -3043,15 +3870,15 @@ class SkyKinDialerApp {
       return target.getTime();
     }
 
-    // 3. 24-hour time or time without AM/PM: "13:50", "13:50:00", "01:50"
-    const matchTime = s.match(/(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+    // 3. 24-hour time or time without AM/PM: "13:50", "13.50", "13:50:00", "01:50", "12:00"
+    const matchTime = s.match(/(\d{1,2})[:.](\d{2})(?:[:.](\d{2}))?/);
     if (matchTime) {
       let hours = parseInt(matchTime[1], 10);
       const minutes = parseInt(matchTime[2], 10);
       const seconds = matchTime[3] ? parseInt(matchTime[3], 10) : 0;
 
-      // If hours is 1..6 during daytime afternoon (>= 12), infer PM
-      if (hours >= 1 && hours <= 6 && now.getHours() >= 12) {
+      // If hours is 1..6 during daytime afternoon (>= 12), infer PM ONLY for bare times without explicit date
+      if (!hasExplicitDate && hours >= 1 && hours <= 6 && now.getHours() >= 12) {
         hours += 12;
       }
 
@@ -3100,9 +3927,12 @@ class SkyKinDialerApp {
     // Refresh queue data from database first
     await this.loadCampaignData();
 
-    const pendingLeads = this.getTodayLeads().filter(l => l.status === 'pending');
+    let pendingLeads = this.getTodayLeads().filter(l => l.status === 'pending');
     if (pendingLeads.length === 0) {
-      this.showToast('No pending leads in today\'s list! Import an Excel file, add numbers, or roll over remaining calls from History.', 'warning');
+      pendingLeads = (this.leads || []).filter(l => l.status === 'pending');
+    }
+    if (pendingLeads.length === 0) {
+      this.showToast('No pending leads in queue! Import an Excel file, add numbers, or roll over remaining calls from History.', 'warning');
       return;
     }
 
@@ -3199,7 +4029,7 @@ class SkyKinDialerApp {
       });
 
       // Filter today's pending leads (excluding any lead ID or phone number already in progress)
-      const pendingLeads = this.getTodayLeads().filter(l => {
+      let pendingLeads = this.getTodayLeads().filter(l => {
         if (l.status !== 'pending') return false;
         if (activeLeadIds.has(Number(l.id))) return false;
         const normPhone = window.skykinNormalizeEtDial(l.phone_number);
@@ -3207,36 +4037,42 @@ class SkyKinDialerApp {
         return true;
       });
 
+      // Fallback: If no today pending leads, check any pending leads in this.leads
       if (pendingLeads.length === 0 && this.activeChannels.size === 0) {
-        this.stopCampaign();
-        this.showToast('All pending customer leads in queue have been processed!', 'success');
-        await this.loadCampaignData();
-        return;
+        const otherPending = (this.leads || []).filter(l => {
+          if (l.status !== 'pending') return false;
+          if (activeLeadIds.has(Number(l.id))) return false;
+          const normPhone = window.skykinNormalizeEtDial(l.phone_number);
+          if (activePhoneNumbers.has(normPhone)) return false;
+          return true;
+        });
+        if (otherPending.length === 0) {
+          this.stopCampaign();
+          this.showToast('All pending customer leads in queue have been processed!', 'success');
+          await this.loadCampaignData();
+          return;
+        }
+        pendingLeads = otherPending;
       }
 
       const now = Date.now();
 
-      // 1. Immediate leads (no scheduled time)
-      const immediateLeads = pendingLeads.filter(l => {
-        const s = String(l.call_time || '').trim().toLowerCase();
-        return !s || s === 'immediate' || s === 'now';
-      });
+      // 1. Immediate leads
+      const immediateLeads = pendingLeads.filter(l => this.isImmediateCallTime(l.call_time));
 
-      // 2. Scheduled leads whose time has arrived
+      // 2. Scheduled leads whose time has arrived and is currently due
       const dueScheduledLeads = pendingLeads.filter(l => {
-        const s = String(l.call_time || '').trim().toLowerCase();
-        if (!s || s === 'immediate' || s === 'now') return false;
-        const ts = this.getLeadScheduledTimestamp(l);
-        if (ts <= 0) return false;
-        return now >= ts;
+        if (this.isImmediateCallTime(l.call_time)) return false;
+        return this.isLeadDueForCall(l);
       });
 
-      const dueLeads = [...immediateLeads, ...dueScheduledLeads];
-      dueLeads.sort((a, b) => {
+      dueScheduledLeads.sort((a, b) => {
         const aTime = this.getLeadScheduledTimestamp(a);
         const bTime = this.getLeadScheduledTimestamp(b);
         return aTime - bTime;
       });
+
+      const dueLeads = [...dueScheduledLeads, ...immediateLeads];
 
       // Check which lines are free and actually registered
       const isLine1Free = this.line1.isRegistered && !this.line1.activeChannelId && (!this.line1.session || this.line1.session.state === 'Terminated');
@@ -3282,35 +4118,50 @@ class SkyKinDialerApp {
 
   getNextLeadInQueue() {
     const now = Date.now();
-    const pending = this.leads.filter(l => l.status === 'pending');
+    let pending = this.getTodayLeads().filter(l => l.status === 'pending');
+    if (pending.length === 0) {
+      pending = (this.leads || []).filter(l => l.status === 'pending');
+    }
     if (pending.length === 0) return null;
 
-    // Separate immediate, upcoming future, and past-expired leads
-    const immediateLeads = pending.filter(l => {
-      const s = String(l.call_time || '').trim().toLowerCase();
-      return !s || s === 'immediate' || s === 'now';
+    // Filter to active campaign if activeCampaignId is set
+    const campId = Number(this.activeCampaignId || this.campaign?.id || 0);
+    if (campId > 0) {
+      const campPending = pending.filter(l => Number(l.campaign_id) === campId);
+      if (campPending.length > 0) {
+        pending = campPending;
+      }
+    }
+
+    const dueNowLeads = [];
+    const futureLeads = [];
+    const immediateLeads = [];
+
+    pending.forEach(l => {
+      if (this.isImmediateCallTime(l.call_time)) {
+        immediateLeads.push(l);
+      } else {
+        const ts = this.getLeadScheduledTimestamp(l);
+        if (this.isLeadDueForCall(l)) {
+          dueNowLeads.push(l);
+        } else if (ts > now) {
+          futureLeads.push(l);
+        }
+      }
     });
 
-    // Future leads: scheduled time is still in the future
-    const futureLeads = pending.filter(l => {
-      const s = String(l.call_time || '').trim().toLowerCase();
-      if (!s || s === 'immediate' || s === 'now') return false;
-      const ts = this.getLeadScheduledTimestamp(l);
-      return ts > now;
-    });
+    // 1. Prioritize scheduled calls whose time has arrived (sorted earliest scheduled call first)
+    if (dueNowLeads.length > 0) {
+      dueNowLeads.sort((a, b) => this.getLeadScheduledTimestamp(a) - this.getLeadScheduledTimestamp(b));
+      return dueNowLeads[0];
+    }
 
-    // Due right now leads: scheduled time arrived
-    const dueNowLeads = pending.filter(l => {
-      const s = String(l.call_time || '').trim().toLowerCase();
-      if (!s || s === 'immediate' || s === 'now') return false;
-      const ts = this.getLeadScheduledTimestamp(l);
-      return ts > 0 && now >= ts;
-    });
+    // 2. Immediate calls
+    if (immediateLeads.length > 0) {
+      return immediateLeads[0];
+    }
 
-    // Priority: Immediate > Due Now > Soonest Future
-    if (immediateLeads.length > 0) return immediateLeads[0];
-    if (dueNowLeads.length > 0) return dueNowLeads[0];
-
+    // 3. Next upcoming future scheduled calls (sorted nearest upcoming time first)
     if (futureLeads.length > 0) {
       futureLeads.sort((a, b) => this.getLeadScheduledTimestamp(a) - this.getLeadScheduledTimestamp(b));
       return futureLeads[0];
@@ -3420,6 +4271,7 @@ class SkyKinDialerApp {
 
   renderActiveChannels() {
     if (!this.channelsContainer) return;
+    this.updateTelephonyKpiCards();
 
     if (this._displayCountdownTimer) {
       clearInterval(this._displayCountdownTimer);
@@ -3481,22 +4333,37 @@ class SkyKinDialerApp {
     // 2. Auto-Dialer Running
     if (this.isRunning) {
       if (!next) {
+        const pendingCount = (this.leads || []).filter(l => l.status === 'pending').length;
+        if (pendingCount > 0) {
+          this.channelsContainer.innerHTML = `
+            <div style="grid-column:1/-1;background:#fffbeb;border:1.5px solid #fde68a;border-radius:10px;padding:16px;text-align:center;">
+              <div style="font-weight:700;color:#92400e;font-size:14px;margin-bottom:4px;">
+                Auto-Dialer Active &bull; Waiting for Scheduled Contacts
+              </div>
+              <div style="font-size:12.5px;color:#a16207;">
+                ${pendingCount} pending contact(s) have past scheduled call times (Past Due). The auto-dialer will not auto-call them when their time has passed. Click "Call" on any row to dial manually.
+              </div>
+            </div>
+          `;
+          return;
+        }
+
         this.channelsContainer.innerHTML = `
           <div style="grid-column:1/-1;background:#f8fafc;border:1px dashed #cbd5e1;border-radius:8px;padding:16px;text-align:center;">
-            <div style="font-weight:700;color:#64748b;font-size:13px;margin-bottom:2px;">Auto-Dialer Active &bull; No Pending Leads</div>
-            <div style="font-size:12px;color:#94a3b8;">All contacts have been dialed. Add numbers or click "Reset Leads" to dial again.</div>
+            <div style="font-weight:700;color:#64748b;font-size:13px;margin-bottom:2px;">Auto-Dialer Idle &bull; All Contacts Completed</div>
+            <div style="font-size:12px;color:#94a3b8;">All contacts in queue have been dialed. Add numbers or click "Reset Leads" to dial again.</div>
           </div>
         `;
         return;
       }
 
-      // Render the waiting card with a live countdown
+      // Render the waiting card with a live countdown or immediate dial indicator
       const countdownId = `cd_${Date.now()}`;
       this.channelsContainer.innerHTML = `
         <div style="grid-column:1/-1;background:#f0fdf4;border:1.5px solid #86efac;border-radius:10px;padding:18px 20px;text-align:center;">
           <div style="font-weight:700;color:#15803d;font-size:14px;margin-bottom:6px;display:flex;align-items:center;justify-content:center;gap:7px;">
             <span style="width:9px;height:9px;border-radius:50%;background:#22c55e;display:inline-block;animation:pulse 1.2s ease-in-out infinite;"></span>
-            Auto-Dialer Active &bull; Next Scheduled Call
+            Auto-Dialer Active &bull; ${isFuture ? 'Next Scheduled Call' : 'Next Call in Queue'}
           </div>
           <div style="font-size:14px;color:#1e293b;font-weight:600;margin-bottom:4px;">
             ${this.escapeHtml(next.customer_name || 'Customer')}
@@ -3507,7 +4374,7 @@ class SkyKinDialerApp {
             Scheduled: <strong>${this.escapeHtml(next.call_time || 'Immediate')}</strong>
           </div>
           <div id="${countdownId}" style="display:inline-block;background:#dcfce7;color:#15803d;font-weight:800;font-size:20px;padding:6px 20px;border-radius:20px;font-family:monospace;letter-spacing:1px;">
-            ${isFuture ? makeCountdown(targetTs) : 'Dialing soon...'}
+            ${isFuture ? makeCountdown(targetTs) : 'Dialing next contact...'}
           </div>
         </div>
       `;
@@ -3596,6 +4463,13 @@ class SkyKinDialerApp {
   }
 
   async deleteLead(leadId) {
+    if (String(leadId).startsWith('sample_')) {
+      this._deletedSampleIds = this._deletedSampleIds || new Set();
+      this._deletedSampleIds.add(leadId);
+      this.renderDesignerContactsTable();
+      this.showToast('Contact removed', 'info');
+      return;
+    }
     // Ultra-fast optimistic UI removal (0ms latency)
     const originalLeads = [...this.leads];
     this.leads = this.leads.filter(l => Number(l.id) !== Number(leadId));
@@ -3603,6 +4477,7 @@ class SkyKinDialerApp {
     this.renderUnansweredTable();
     this.updateLocalStats();
     this.renderActiveChannels();
+    this.renderDesignerContactsTable();
     this.showToast('Lead removed', 'info');
 
     try {
@@ -3617,6 +4492,7 @@ class SkyKinDialerApp {
       this.renderUnansweredTable();
       this.updateLocalStats();
       this.renderActiveChannels();
+      this.renderDesignerContactsTable();
       this.showToast('Could not delete lead from server', 'error');
     }
   }
@@ -3915,15 +4791,47 @@ class SkyKinDialerApp {
 
   async handleFileUpload(e) {
     if (e) e.preventDefault();
+    if (this._isUploadingLeads) return;
+
     const fileInp = document.getElementById('leadFileInput');
     if (!fileInp || !fileInp.files || fileInp.files.length === 0) {
       this.showToast('Please select a CSV, Excel, or TXT file to upload.', 'error');
       return;
     }
+
+    const submitBtn = document.getElementById('btnSubmitUploadLeads') || e?.target?.querySelector('button[type="submit"]');
+    this._isUploadingLeads = true;
+    if (submitBtn) {
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Importing leads...';
+    }
+
     const targetCampaignId = document.getElementById('uploadCampaignSelect')?.value || this.activeCampaignId || this.campaign?.id || 1;
     const formData = new FormData();
     formData.append('lead_file', fileInp.files[0]);
     formData.append('campaign_id', targetCampaignId);
+
+    const autoSchedule = document.getElementById('uploadAutoScheduleToggle')?.checked;
+    if (autoSchedule !== undefined) {
+      formData.append('auto_schedule', autoSchedule ? '1' : '0');
+    }
+    const strat = document.getElementById('uploadScheduleStrategy')?.value || 'interval';
+    formData.append('schedule_strategy', strat);
+
+    if (strat === 'interval') {
+      const intv = document.getElementById('uploadScheduleInterval')?.value || '5';
+      formData.append('schedule_interval_mins', intv);
+    } else if (strat === 'window') {
+      const winStart = document.getElementById('uploadWindowStart')?.value || '09:00';
+      const winEnd = document.getElementById('uploadWindowEnd')?.value || '17:00';
+      formData.append('schedule_window_start', winStart);
+      formData.append('schedule_window_end', winEnd);
+    } else if (strat === 'batch') {
+      const batchSize = document.getElementById('uploadBatchSize')?.value || '5';
+      const intv = document.getElementById('uploadScheduleInterval')?.value || '5';
+      formData.append('schedule_batch_size', batchSize);
+      formData.append('schedule_interval_mins', intv);
+    }
 
     this.showToast('Importing customer leads...', 'info');
     try {
@@ -3936,37 +4844,68 @@ class SkyKinDialerApp {
         if (nameLabel) nameLabel.textContent = '';
         this.closeAllModals();
 
+        await this.loadCampaignData(targetCampaignId);
         await this.loadCampaignsOverview();
-        if (String(this.campaign?.id) === String(targetCampaignId)) {
-          if (data.leads && Array.isArray(data.leads)) {
-            this.leads = data.leads;
-            this.renderLeadsTables();
-            this.renderUnansweredTable();
-            this.updateLocalStats();
-          } else {
-            await this.loadCampaignData(targetCampaignId);
-          }
-        }
+        this.renderDesignerContactsTable();
+        this.updateDesignerUI();
       } else {
         this.showToast(data.error || 'Failed to import file', 'error');
       }
     } catch (err) {
       this.showToast('Error uploading lead file', 'error');
+    } finally {
+      this._isUploadingLeads = false;
+      if (submitBtn) {
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Import Numbers to Campaign';
+      }
     }
   }
 
   async handleManualUpload(e) {
     if (e) e.preventDefault();
+    if (this._isSavingManual) return;
+
     const textInp = document.getElementById('manualLeadsText');
     const text = textInp?.value.trim() || '';
     if (!text) {
       this.showToast('Please enter at least one contact line', 'error');
       return;
     }
+
+    const submitBtn = e?.target?.querySelector('button[type="submit"]');
+    this._isSavingManual = true;
+    if (submitBtn) {
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Adding numbers...';
+    }
+
     const targetCampaignId = document.getElementById('manualCampaignSelect')?.value || this.activeCampaignId || this.campaign?.id || 1;
     const formData = new FormData();
     formData.append('leads_text', text);
     formData.append('campaign_id', targetCampaignId);
+
+    const autoSchedule = document.getElementById('manualAutoScheduleToggle')?.checked;
+    if (autoSchedule !== undefined) {
+      formData.append('auto_schedule', autoSchedule ? '1' : '0');
+    }
+    const strat = document.getElementById('manualScheduleStrategy')?.value || 'interval';
+    formData.append('schedule_strategy', strat);
+
+    if (strat === 'interval') {
+      const intv = document.getElementById('manualScheduleInterval')?.value || '5';
+      formData.append('schedule_interval_mins', intv);
+    } else if (strat === 'window') {
+      const winStart = document.getElementById('manualWindowStart')?.value || '09:00';
+      const winEnd = document.getElementById('manualWindowEnd')?.value || '17:00';
+      formData.append('schedule_window_start', winStart);
+      formData.append('schedule_window_end', winEnd);
+    } else if (strat === 'batch') {
+      const batchSize = document.getElementById('manualBatchSize')?.value || '5';
+      const intv = document.getElementById('manualScheduleInterval')?.value || '5';
+      formData.append('schedule_batch_size', batchSize);
+      formData.append('schedule_interval_mins', intv);
+    }
 
     try {
       const res = await fetch('api.php?action=save_manual_leads', { method: 'POST', body: formData });
@@ -3976,15 +4915,21 @@ class SkyKinDialerApp {
         if (textInp) textInp.value = '';
         this.closeAllModals();
 
+        await this.loadCampaignData(targetCampaignId);
         await this.loadCampaignsOverview();
-        if (String(this.campaign?.id) === String(targetCampaignId)) {
-          await this.loadCampaignData(targetCampaignId);
-        }
+        this.renderDesignerContactsTable();
+        this.updateDesignerUI();
       } else {
         this.showToast(data.error || 'Failed to add leads', 'error');
       }
     } catch (err) {
       this.showToast('Error saving leads', 'error');
+    } finally {
+      this._isSavingManual = false;
+      if (submitBtn) {
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Add Numbers to Campaign';
+      }
     }
   }
 
@@ -4028,6 +4973,7 @@ class SkyKinDialerApp {
     // Originate SIP outbound call
     const dom = localStorage.getItem('sip_domain') || 'client1.skykin.local';
     this.sipMakeCall(number, dom);
+    this.updateTelephonyKpiCards();
 
     // Start live timer
     let sec = 0;

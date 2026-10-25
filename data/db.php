@@ -111,8 +111,35 @@ class DialerDB {
             $this->pdo->exec("ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS call_time VARCHAR(100) DEFAULT 'Immediate'");
             $this->pdo->exec("ALTER TABLE audio_recordings ADD COLUMN IF NOT EXISTS fusionpbx_path VARCHAR(255) DEFAULT '/var/lib/freeswitch/recordings/welcome_human_voice.wav'");
 
+            // Auto-Scheduling & System Calling Method configuration columns
+            $this->pdo->exec("ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS calling_method VARCHAR(50) DEFAULT 'manual'");
+            $this->pdo->exec("ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS schedule_strategy VARCHAR(50) DEFAULT 'interval'");
+            $this->pdo->exec("ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS schedule_interval_mins INT DEFAULT 5");
+            $this->pdo->exec("ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS schedule_window_start VARCHAR(20) DEFAULT '09:00'");
+            $this->pdo->exec("ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS schedule_window_end VARCHAR(20) DEFAULT '17:00'");
+            $this->pdo->exec("ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS schedule_batch_size INT DEFAULT 5");
+            $this->pdo->exec("ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS schedule_start_time VARCHAR(50) DEFAULT 'now'");
+
+            // Ethio Telecom Inbound Integration API Logs Table
+            $this->pdo->exec("CREATE TABLE IF NOT EXISTS ethio_telecom_api_logs (
+                id SERIAL PRIMARY KEY,
+                batch_id VARCHAR(100) NOT NULL,
+                campaign_id INT,
+                ip_address VARCHAR(50),
+                total_received INT DEFAULT 0,
+                imported_count INT DEFAULT 0,
+                duplicates_count INT DEFAULT 0,
+                invalid_count INT DEFAULT 0,
+                dnc_blocked_count INT DEFAULT 0,
+                schedule_mode VARCHAR(50) DEFAULT 'auto',
+                status VARCHAR(50) DEFAULT 'success',
+                error_message TEXT DEFAULT '',
+                payload_sample TEXT DEFAULT '',
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            )");
+
             // Sync all sequence values to max(id) so SERIAL primary keys never collide
-            $seqTables = ['campaigns', 'leads', 'call_logs', 'users', 'scheduled_callbacks', 'dnc_numbers', 'audio_recordings'];
+            $seqTables = ['campaigns', 'leads', 'call_logs', 'users', 'scheduled_callbacks', 'dnc_numbers', 'audio_recordings', 'ethio_telecom_api_logs'];
             foreach ($seqTables as $tbl) {
                 try {
                     $this->pdo->exec("SELECT setval(pg_get_serial_sequence('{$tbl}', 'id'), COALESCE((SELECT MAX(id) FROM {$tbl}), 1))");
@@ -159,6 +186,13 @@ class DialerDB {
                 max_concurrent INTEGER DEFAULT 50,
                 total_leads INTEGER DEFAULT 0,
                 completed_leads INTEGER DEFAULT 0,
+                calling_method TEXT DEFAULT 'manual',
+                schedule_strategy TEXT DEFAULT 'interval',
+                schedule_interval_mins INTEGER DEFAULT 5,
+                schedule_window_start TEXT DEFAULT '09:00',
+                schedule_window_end TEXT DEFAULT '17:00',
+                schedule_batch_size INTEGER DEFAULT 5,
+                schedule_start_time TEXT DEFAULT 'now',
                 created_by TEXT DEFAULT 'Agent1',
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -227,6 +261,22 @@ class DialerDB {
                 filepath TEXT NOT NULL,
                 fusionpbx_path TEXT NOT NULL,
                 duration_sec INTEGER DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )",
+            "CREATE TABLE IF NOT EXISTS ethio_telecom_api_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                batch_id TEXT NOT NULL,
+                campaign_id INTEGER,
+                ip_address TEXT,
+                total_received INTEGER DEFAULT 0,
+                imported_count INTEGER DEFAULT 0,
+                duplicates_count INTEGER DEFAULT 0,
+                invalid_count INTEGER DEFAULT 0,
+                dnc_blocked_count INTEGER DEFAULT 0,
+                schedule_mode TEXT DEFAULT 'auto',
+                status TEXT DEFAULT 'success',
+                error_message TEXT DEFAULT '',
+                payload_sample TEXT DEFAULT '',
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )"
         ];

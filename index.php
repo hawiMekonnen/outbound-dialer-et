@@ -196,19 +196,19 @@ $initials      = strtoupper(substr($currentUser['username'] ?? 'A', 0, 2));
         <div class="camp-metric-row">
           <div class="camp-metric-card">
             <div class="camp-metric-lbl">Agents ready</div>
-            <div class="camp-metric-val" id="kpiAgentsReady">14</div>
+            <div class="camp-metric-val" id="kpiAgentsReady">0</div>
           </div>
           <div class="camp-metric-card">
             <div class="camp-metric-lbl">Dialing now</div>
-            <div class="camp-metric-val" id="kpiDialingNow">22</div>
+            <div class="camp-metric-val" id="kpiDialingNow">0</div>
           </div>
           <div class="camp-metric-card">
-            <div class="camp-metric-lbl">Abandon rate &bull; target below 3%</div>
-            <div class="camp-metric-val green" id="kpiAbandonRate">1.8%</div>
+            <div class="camp-metric-lbl" id="kpiAbandonRateLbl">Abandon rate &bull; target below 3%</div>
+            <div class="camp-metric-val green" id="kpiAbandonRate">0.0%</div>
           </div>
           <div class="camp-metric-card">
             <div class="camp-metric-lbl">Avg talk time</div>
-            <div class="camp-metric-val" id="kpiAvgTalkTime">03:40</div>
+            <div class="camp-metric-val" id="kpiAvgTalkTime">00:00</div>
           </div>
         </div>
 
@@ -217,7 +217,51 @@ $initials      = strtoupper(substr($currentUser['username'] ?? 'A', 0, 2));
           
           <!-- LEFT: All campaigns (60%) -->
           <div class="camp-panel-box">
-            <div class="camp-panel-heading">All campaigns</div>
+            <!-- Header row: title + count badge -->
+            <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:14px;">
+              <div style="display:flex;align-items:center;gap:10px;">
+                <div class="camp-panel-heading" style="margin:0;">All campaigns</div>
+                <span id="campaignsCountBadge" style="background:#f1f5f9;color:#475569;font-size:11px;font-weight:700;padding:2px 9px;border-radius:20px;border:1px solid #e2e8f0;">0</span>
+              </div>
+            </div>
+
+            <!-- Search + Filter Toolbar -->
+            <div id="campaignFilterBar" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:14px;">
+              <!-- Search Input -->
+              <div style="position:relative;flex:1;min-width:160px;">
+                <svg style="position:absolute;left:10px;top:50%;transform:translateY(-50%);width:15px;height:15px;color:#94a3b8;pointer-events:none;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+                </svg>
+                <input
+                  type="text"
+                  id="campaignSearchInput"
+                  placeholder="Search campaigns..."
+                  oninput="app.filterCampaignsTable()"
+                  style="width:100%;padding:7px 10px 7px 33px;border:1.5px solid #e2e8f0;border-radius:8px;font-size:12.5px;color:#0f172a;background:#fff;outline:none;transition:border-color 0.15s;box-sizing:border-box;"
+                  onfocus="this.style.borderColor='#00A651'" onblur="this.style.borderColor='#e2e8f0'"
+                >
+              </div>
+
+              <!-- Status Filter -->
+              <select id="campaignStatusFilter" onchange="app.filterCampaignsTable()" style="padding:7px 10px;border:1.5px solid #e2e8f0;border-radius:8px;font-size:12.5px;color:#334155;background:#fff;outline:none;cursor:pointer;min-width:110px;font-weight:500;">
+                <option value="">All Status</option>
+                <option value="running">Running</option>
+                <option value="idle">Idle</option>
+                <option value="completed">Completed</option>
+                <option value="paused">Paused</option>
+              </select>
+
+              <!-- Type Filter — with descriptions as option titles -->
+              <select id="campaignTypeFilter" onchange="app.filterCampaignsTable()" style="padding:7px 10px;border:1.5px solid #e2e8f0;border-radius:8px;font-size:12.5px;color:#334155;background:#fff;outline:none;cursor:pointer;min-width:140px;font-weight:500;">
+                <option value="">All Dialing Modes</option>
+                <option value="predictive">Predictive — Auto multi-dial</option>
+                <option value="progressive">Progressive — One at a time</option>
+                <option value="preview">Preview — Agent reviews first</option>
+                <option value="agentless">Agentless — IVR only, no agent</option>
+              </select>
+            </div>
+
+
             <div style="overflow-x:auto;">
               <table class="camp-table">
                 <thead>
@@ -237,6 +281,7 @@ $initials      = strtoupper(substr($currentUser['username'] ?? 'A', 0, 2));
               </table>
             </div>
           </div>
+
 
           <!-- RIGHT: New campaign Wizard Panel (40%) -->
           <div class="camp-panel-box">
@@ -298,11 +343,70 @@ $initials      = strtoupper(substr($currentUser['username'] ?? 'A', 0, 2));
                 </select>
               </div>
 
+              <div class="form-group" style="margin-bottom:14px;">
+                <label class="camp-input-label">Calling &amp; Scheduling Method</label>
+                <select id="newCampaignCallingMethodSelect" class="camp-input-field" onchange="app.handleCallingMethodChange(this.value)">
+                  <option value="auto_schedule" selected>System Auto-Schedule (Upload Name &amp; Phone only)</option>
+                  <option value="manual">Manual Scheduling (Upload exact times or Immediate)</option>
+                </select>
+                <div style="font-size:11px;color:#64748b;margin-top:4px;">
+                  In System Auto-Schedule mode, the system automatically schedules the calls. The dialer will place calls at scheduled times when you click Start Auto-Dialer.
+                </div>
+              </div>
+
+              <!-- Configurable System Auto-Scheduling Options -->
+              <div id="newCampaignAutoScheduleOptions" style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:12px 14px;margin-bottom:14px;">
+                <div style="font-size:11.5px;font-weight:700;color:#166534;margin-bottom:8px;display:flex;align-items:center;gap:6px;">
+                  <span>How do you want the system to schedule calls?</span>
+                </div>
+
+                <div style="margin-bottom:10px;">
+                  <label style="font-size:11px;font-weight:600;color:#374151;display:block;margin-bottom:3px;">Scheduling Strategy</label>
+                  <select id="newCampaignScheduleStrategy" class="camp-input-field" style="background:#fff;font-size:12px;padding:6px 10px;" onchange="app.handleScheduleStrategyChange(this.value)">
+                    <option value="interval" selected>Interval Staggering (Spread calls every X minutes)</option>
+                    <option value="window">Business Hours Window (Distribute calls within hours)</option>
+                    <option value="batch">Wave / Batch Sizing (Dial groups of numbers at set intervals)</option>
+                  </select>
+                </div>
+
+                <div id="rowScheduleInterval" style="margin-bottom:8px;">
+                  <label style="font-size:11px;font-weight:600;color:#374151;display:block;margin-bottom:3px;">Stagger Interval (Time between calls)</label>
+                  <select id="newCampaignScheduleInterval" class="camp-input-field" style="background:#fff;font-size:12px;padding:6px 10px;">
+                    <option value="2">Every 2 minutes</option>
+                    <option value="5" selected>Every 5 minutes (Recommended)</option>
+                    <option value="10">Every 10 minutes</option>
+                    <option value="15">Every 15 minutes</option>
+                    <option value="30">Every 30 minutes</option>
+                  </select>
+                </div>
+
+                <div id="rowScheduleWindow" style="display:none;margin-bottom:8px;">
+                  <label style="font-size:11px;font-weight:600;color:#374151;display:block;margin-bottom:3px;">Business Hours Window</label>
+                  <div style="display:flex;gap:8px;align-items:center;">
+                    <input type="time" id="newCampaignWindowStart" value="09:00" class="camp-input-field" style="background:#fff;font-size:12px;padding:5px 8px;flex:1;">
+                    <span style="font-size:11.5px;color:#64748b;">to</span>
+                    <input type="time" id="newCampaignWindowEnd" value="17:00" class="camp-input-field" style="background:#fff;font-size:12px;padding:5px 8px;flex:1;">
+                  </div>
+                  <div style="font-size:10.5px;color:#64748b;margin-top:3px;">Uploaded contacts will be distributed evenly between these hours.</div>
+                </div>
+
+                <div id="rowScheduleBatch" style="display:none;margin-bottom:6px;">
+                  <label style="font-size:11px;font-weight:600;color:#374151;display:block;margin-bottom:3px;">Batch Size (Contacts per wave)</label>
+                  <select id="newCampaignBatchSize" class="camp-input-field" style="background:#fff;font-size:12px;padding:6px 10px;">
+                    <option value="2">2 contacts per wave</option>
+                    <option value="5" selected>5 contacts per wave</option>
+                    <option value="10">10 contacts per wave</option>
+                    <option value="20">20 contacts per wave</option>
+                  </select>
+                </div>
+              </div>
+
               <div class="form-group" style="margin-bottom:22px;">
                 <label class="camp-input-label">Initial contacts</label>
                 <div class="camp-browse-container">
-                  <input type="text" id="newCampaignContactsInput" value="ethio_subscribers.xlsx" readonly class="camp-browse-input">
-                  <button type="button" class="camp-browse-btn" onclick="app.openModal('modalUpload')">Browse</button>
+                  <input type="text" id="newCampaignContactsInput" placeholder="No file chosen (Click Browse to upload)" readonly class="camp-browse-input">
+                  <input type="file" id="newCampaignFileInput" accept=".xlsx,.csv,.xls,.txt,.tsv" style="display:none;" onchange="app.handleNewCampaignFileSelect(this)">
+                  <button type="button" class="camp-browse-btn" onclick="document.getElementById('newCampaignFileInput').click()">Browse</button>
                 </div>
               </div>
 
@@ -313,161 +417,243 @@ $initials      = strtoupper(substr($currentUser['username'] ?? 'A', 0, 2));
       </div>
 
       <!-- ── SECTION B: MESSAGE DESIGNER & LIVE RESULTS (Secondary Screen) ── -->
-      <!-- ── SECTION B: MESSAGE DESIGNER & LIVE RESULTS (Exact Match to Picture 2) ── -->
+      <!-- ── SECTION B: MESSAGE DESIGNER, STATS & CONTACTS (Exact Match to Picture 1 & Picture 3) ── -->
       <div id="subViewCampaignsDesigner" style="display:none;">
         
-        <!-- Top Navigation Tabs (Campaigns overview | Campaign · Designer) -->
-        <div class="des-nav-tabs">
-          <button type="button" class="des-nav-tab" onclick="switchCampaignSubView('list')">Campaigns overview</button>
-          <button type="button" class="des-nav-tab active">
-            <span id="designerTabCampaignName">Bill reminder: October</span> &middot; Designer
-          </button>
+        <!-- Top Navigation & Header Actions (Picture 3 Match) -->
+        <div class="des-top-bar">
+          <div class="des-nav-tabs" style="margin-bottom:0;border-bottom:none;">
+            <button type="button" class="des-nav-tab" onclick="switchCampaignSubView('list')">Campaigns overview</button>
+            <button type="button" class="des-nav-tab active">
+              <span id="designerTabCampaignName">Bill reminder: October</span> &middot; Designer
+            </button>
+          </div>
+
+          <!-- Top Right Action Buttons (Picture 3: Open queue | Save | Launch campaign) -->
+          <div style="display:flex;align-items:center;gap:10px;">
+            <button type="button" class="des-btn-text" onclick="app.openCampaignInQueue(app.activeCampaignId || app.campaign?.id)">Open queue</button>
+            <button type="button" class="des-btn-save" onclick="app.saveCampaignDesigner()">Save</button>
+            <button type="button" id="btnLaunchDesignerCampaign" class="des-btn-launch" onclick="app.toggleCampaignLaunch()">Launch campaign</button>
+          </div>
         </div>
 
-        <!-- Two Column Main Layout: Message designer (Left) & Live campaign performance (Right) -->
-        <div class="des-grid">
+        <!-- Main Layout: Message (Left) & Progress / Keypad (Right) (Picture 1 Match) -->
+        <div class="des-grid" style="grid-template-columns: 1.6fr 1fr; gap: 20px; align-items: start;">
           
-          <!-- LEFT CARD: Message designer -->
-          <div class="des-panel">
-            <div class="des-panel-header">
-              <h2 class="des-panel-title">Message designer</h2>
-              <span id="designerCampaignTypeBadge" class="des-badge-pill">PREDICTIVE</span>
+          <!-- LEFT CARD: Message -->
+          <div class="des-panel" style="padding: 24px;">
+            <div style="margin-bottom: 20px;">
+              <h2 style="font-size: 16px; font-weight: 700; color: #0f172a; margin: 0;">Message</h2>
+              <span id="designerCampaignTypeBadge" style="display:none;">PREDICTIVE</span>
             </div>
 
-            <!-- IVR Audio Voice Prompt Selector -->
-            <div style="margin-bottom:16px;">
-              <label class="des-field-label">IVR audio voice prompt (WAV)</label>
-              <select id="designerAudioPromptSelect" class="des-select-box" onchange="app.handleDesignerAudioChange(this.value)">
-                <option value="assets/audio/welcome_human_voice.wav" selected>Human Welcome Recording (WAV) &middot; Amharic</option>
+            <!-- Voice prompt -->
+            <div style="margin-bottom: 16px;">
+              <label style="display:block;font-size:12px;font-weight:600;color:#64748b;margin-bottom:6px;">Voice prompt</label>
+              <select id="designerAudioPromptSelect" class="des-clean-field" onchange="app.handleDesignerAudioChange(this.value)">
+                <option value="assets/audio/welcome_human_voice.wav" selected>Human Welcome Recording &middot; Amharic</option>
               </select>
             </div>
 
-            <!-- Message Script Textarea -->
-            <div style="margin-bottom:6px;">
-              <label class="des-field-label">Message script</label>
-              <textarea id="campaignMessageText" class="des-textarea" spellcheck="false">ውድ ደንበኛ: የ 450 ብር የክፍያ ሂሳብዎ በጥቅምት 15 ቀን ይጠናቀቃል። በቴሌብር ለመክፈል 1ን ይጫኑ: ጥሪ ለመጠየቅ 2ን: ከደንበኞች አገልግሎት ጋር ለመነጋገር 3ን ይጫኑ።</textarea>
+            <!-- Script -->
+            <div style="margin-bottom: 14px;">
+              <label style="display:block;font-size:12px;font-weight:600;color:#64748b;margin-bottom:6px;">Script</label>
+              <textarea id="campaignMessageText" class="des-script-box" spellcheck="false" style="width:100%;border:1px solid #e2e8f0;border-radius:8px;padding:12px 14px;font-size:12.5px;line-height:1.6;color:#0f172a;background:#fff;outline:none;min-height:86px;resize:vertical;box-sizing:border-box;font-family:inherit;">ውድ ደንበኛ፡ የ 450 ብር የክፍያ ሂሳብዎ በጥቅምት 15 ቀን ይጠናቀቃል። በቴሌብር ለመክፈል 1ን ይጫኑ፡ ጥሪ ለመጠየቅ 2ን፡ ከደንበኞች አገልግሎት ጋር ለመነጋገር 3ን ይጫኑ።</textarea>
             </div>
 
-            <!-- Language Buttons (አማርኛ / Afaan Oromoo / English) -->
-            <div class="des-lang-group">
-              <button type="button" class="des-lang-btn active" id="langBtnAmharic" onclick="setDesignerLang('amharic')">አማርኛ</button>
-              <button type="button" class="des-lang-btn" id="langBtnOromifa" onclick="setDesignerLang('oromifa')">Afaan Oromoo</button>
-              <button type="button" class="des-lang-btn" id="langBtnEnglish" onclick="setDesignerLang('english')">English</button>
+            <!-- Language Buttons & Test audio row -->
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;">
+              <div class="des-lang-group" style="margin:0;">
+                <button type="button" class="des-lang-btn active" id="langBtnAmharic" onclick="setDesignerLang('amharic')">አማርኛ</button>
+                <button type="button" class="des-lang-btn" id="langBtnOromifa" onclick="setDesignerLang('oromifa')">Afaan Oromoo</button>
+                <button type="button" class="des-lang-btn" id="langBtnEnglish" onclick="setDesignerLang('english')">English</button>
+              </div>
+              <button type="button" class="des-test-audio-btn" onclick="playVoicePreview()" style="background:none;border:none;color:#475569;font-size:12.5px;font-weight:600;cursor:pointer;padding:4px 8px;" title="Test Audio Preview">
+                Test audio
+              </button>
             </div>
 
-            <!-- Toggle 1: Natural Human Audio -->
-            <div class="des-toggle-row">
-              <span class="des-toggle-label">Natural human audio playback via Softphone/SIP</span>
+            <!-- Toggle 1: Human audio playback -->
+            <div class="des-toggle-row" style="margin-bottom:16px;">
+              <span style="font-size:13px;font-weight:500;color:#334155;">Human audio playback</span>
               <label class="sc-switch">
                 <input type="checkbox" id="chkNaturalVoice" checked>
                 <span class="sc-slider"></span>
               </label>
             </div>
 
-            <!-- Toggle 2: Personalize with Name & Balance -->
+            <!-- Toggle 2: Personalize name & balance -->
             <div class="des-toggle-row" style="margin-bottom:24px;">
-              <span class="des-toggle-label">Personalize with customer name and debt balance</span>
+              <span style="font-size:13px;font-weight:500;color:#334155;">Personalize name &amp; balance</span>
               <label class="sc-switch">
                 <input type="checkbox" id="chkPersonalize" checked>
                 <span class="sc-slider"></span>
               </label>
             </div>
 
-            <!-- Action Buttons -->
-            <div style="display:flex;gap:10px;align-items:center;margin-bottom:10px;flex-wrap:wrap;">
-              <button type="button" class="des-btn-outline" onclick="playVoicePreview()">Test voice audio</button>
-              <button type="button" class="des-btn-solid-green" onclick="app.saveCampaignDesigner()">Save settings</button>
-              <button type="button" class="des-btn-outline" onclick="app.openAddContactsModal(app.activeCampaignId || app.campaign?.id)">Add numbers</button>
-            </div>
+            <!-- SCHEDULE section (Picture 1) -->
             <div>
-              <button type="button" class="des-btn-outline" onclick="app.exportCampaignContacts(app.activeCampaignId || app.campaign?.id)">Export CSV</button>
+              <div style="font-size:11px;font-weight:700;color:#64748b;letter-spacing:0.8px;text-transform:uppercase;margin-bottom:10px;">
+                SCHEDULE
+              </div>
+              <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;">
+                <div>
+                  <label style="display:block;font-size:12px;color:#64748b;font-weight:500;margin-bottom:6px;">Method</label>
+                  <select id="designerCallingMethodSelect" class="des-clean-field" onchange="app.handleDesignerCallingMethodChange(this.value)">
+                    <option value="auto_schedule" selected>Auto-schedule</option>
+                    <option value="manual">Manual</option>
+                  </select>
+                </div>
+                <div>
+                  <label style="display:block;font-size:12px;color:#64748b;font-weight:500;margin-bottom:6px;">Strategy</label>
+                  <select id="designerScheduleStrategy" class="des-clean-field" onchange="app.handleDesignerScheduleStrategyChange(this.value)">
+                    <option value="interval" selected>Staggered</option>
+                    <option value="window">Business Hours</option>
+                    <option value="batch">Wave / Batch</option>
+                  </select>
+                </div>
+                <div>
+                  <label style="display:block;font-size:12px;color:#64748b;font-weight:500;margin-bottom:6px;">Interval</label>
+                  <select id="designerScheduleInterval" class="des-clean-field">
+                    <option value="2">Every 2 min</option>
+                    <option value="5" selected>Every 5 min</option>
+                    <option value="10">Every 10 min</option>
+                    <option value="15">Every 15 min</option>
+                    <option value="30">Every 30 min</option>
+                  </select>
+                </div>
+              </div>
+
+              <!-- Hidden inputs for compatibility with saveCampaignDesigner -->
+              <input type="hidden" id="designerWindowStart" value="09:00">
+              <input type="hidden" id="designerWindowEnd" value="17:00">
+              <input type="hidden" id="designerBatchSize" value="5">
+              <span id="designerCampaignStatusBadge" style="display:none;"><span class="dot"></span>Running</span>
+              <span id="designerProgressPercent" style="display:none;">Progress 0%</span>
+              <div id="designerProgressBarFill" style="display:none;"></div>
             </div>
+
           </div>
 
-          <!-- RIGHT CARD: Live campaign performance -->
-          <div class="des-panel">
-            <div class="des-panel-header">
-              <h2 class="des-panel-title">Live campaign performance</h2>
-              <span id="designerCampaignStatusBadge" class="des-status-pill running">
-                <span class="dot"></span>Running
-              </span>
-            </div>
+          <!-- RIGHT COLUMN: Progress Card (Top) & Keypad Card (Bottom) -->
+          <div style="display:flex;flex-direction:column;gap:20px;">
+            
+            <!-- CARD 1: Progress (Picture 1 Match) -->
+            <div class="des-panel" style="padding: 22px 24px;">
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;">
+                <h3 style="font-size:15px;font-weight:700;color:#0f172a;margin:0;">Progress</h3>
+                <span id="designerProgressRatio" style="font-size:12px;color:#64748b;font-weight:500;">0 of 8 dialed</span>
+              </div>
 
-            <!-- 5 Stat Cards in a row -->
-            <div class="des-stat-grid">
-              <div class="des-stat-card">
-                <div class="des-stat-num" id="chipScheduled">1</div>
-                <div class="des-stat-sub">Scheduled</div>
-              </div>
-              <div class="des-stat-card">
-                <div class="des-stat-num" id="chipDialed">0</div>
-                <div class="des-stat-sub">Dialed</div>
-              </div>
-              <div class="des-stat-card">
-                <div class="des-stat-num" id="chipAnswered">0</div>
-                <div class="des-stat-sub">Answered</div>
-              </div>
-              <div class="des-stat-card">
-                <div class="des-stat-num" id="chipBusy">0</div>
-                <div class="des-stat-sub">Busy</div>
-              </div>
-              <div class="des-stat-card">
-                <div class="des-stat-num" id="chipNoAnswer">0</div>
-                <div class="des-stat-sub">No answer</div>
-              </div>
-            </div>
-
-            <!-- Progress Bar -->
-            <div class="des-progress-row">
-              <span id="designerProgressPercent" style="font-weight:600;color:#0f172a;">Progress 0%</span>
-              <span id="designerProgressRatio" style="color:#64748b;font-size:12px;">0 of 1 dialed</span>
-            </div>
-            <div class="des-progress-bar-track">
-              <div id="designerProgressBarFill" class="des-progress-bar-fill" style="width:0%;"></div>
-            </div>
-
-            <!-- Keypad IVR Actions -->
-            <div class="des-ivr-section-title">Customer keypad IVR actions</div>
-
-            <!-- Action 1: Telebirr pay -->
-            <div class="des-ivr-item" onclick="app.showToast('Key 1: Automatically pushes Telebirr USSD payment prompt &amp; SMS reference to customer', 'info')">
-              <div class="des-ivr-badge green">1</div>
-              <div>
-                <div class="des-ivr-title">Telebirr pay</div>
-                <div class="des-ivr-desc">Send payment SMS push</div>
+              <div style="display:grid;grid-template-columns:repeat(5, 1fr);gap:6px;text-align:center;">
+                <div>
+                  <div id="chipScheduled" style="font-size:22px;font-weight:700;color:#0f172a;line-height:1.1;">8</div>
+                  <div style="font-size:11px;color:#64748b;margin-top:6px;font-weight:500;">Scheduled</div>
+                </div>
+                <div>
+                  <div id="chipDialed" style="font-size:22px;font-weight:700;color:#0f172a;line-height:1.1;">0</div>
+                  <div style="font-size:11px;color:#64748b;margin-top:6px;font-weight:500;">Dialed</div>
+                </div>
+                <div>
+                  <div id="chipAnswered" style="font-size:22px;font-weight:700;color:#0f172a;line-height:1.1;">0</div>
+                  <div style="font-size:11px;color:#64748b;margin-top:6px;font-weight:500;">Answered</div>
+                </div>
+                <div>
+                  <div id="chipBusy" style="font-size:22px;font-weight:700;color:#0f172a;line-height:1.1;">0</div>
+                  <div style="font-size:11px;color:#64748b;margin-top:6px;font-weight:500;">Busy</div>
+                </div>
+                <div>
+                  <div id="chipNoAnswer" style="font-size:22px;font-weight:700;color:#0f172a;line-height:1.1;">0</div>
+                  <div style="font-size:11px;color:#64748b;margin-top:6px;font-weight:500;">No answer</div>
+                </div>
               </div>
             </div>
 
-            <!-- Action 2: Callback -->
-            <div class="des-ivr-item" onclick="switchNav('tabCallbacks', 'callbacks'); app.showToast('Key 2: Instantly schedules customer callback in queue', 'info');">
-              <div class="des-ivr-badge blue">2</div>
-              <div>
-                <div class="des-ivr-title">Callback</div>
-                <div class="des-ivr-desc">Schedule a return call</div>
+            <!-- CARD 2: Keypad (Picture 1 Match) -->
+            <div class="des-panel" style="padding: 22px 24px;">
+              <div style="margin-bottom:16px;">
+                <h3 style="font-size:15px;font-weight:700;color:#0f172a;margin:0;">Keypad</h3>
+              </div>
+
+              <div style="display:flex;flex-direction:column;">
+                <!-- 1 Telebirr pay -->
+                <div style="display:flex;align-items:center;gap:14px;padding:12px 0;border-bottom:1px solid #f1f5f9;cursor:pointer;" onclick="app.showToast('Key 1: Telebirr USSD payment prompt', 'info')">
+                  <div style="width:24px;height:24px;border-radius:6px;background:#15803d;color:#fff;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex-shrink:0;">1</div>
+                  <span style="font-size:13px;font-weight:600;color:#1e293b;">Telebirr pay</span>
+                </div>
+
+                <!-- 2 Callback -->
+                <div style="display:flex;align-items:center;gap:14px;padding:12px 0;border-bottom:1px solid #f1f5f9;cursor:pointer;" onclick="switchNav('tabCallbacks', 'callbacks'); app.showToast('Key 2: Schedule callback', 'info');">
+                  <div style="width:24px;height:24px;border-radius:6px;background:#1d4ed8;color:#fff;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex-shrink:0;">2</div>
+                  <span style="font-size:13px;font-weight:600;color:#1e293b;">Callback</span>
+                </div>
+
+                <!-- 3 Live agent -->
+                <div style="display:flex;align-items:center;gap:14px;padding-top:12px;cursor:pointer;" onclick="switchNav('tabDialer', 'dialer/agent'); app.showToast('Key 3: Transfer to live agent', 'success');">
+                  <div style="width:24px;height:24px;border-radius:6px;background:#064e3b;color:#fff;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex-shrink:0;">3</div>
+                  <span style="font-size:13px;font-weight:600;color:#1e293b;">Live agent</span>
+                </div>
               </div>
             </div>
 
-            <!-- Action 3: Live agent -->
-            <div class="des-ivr-item" onclick="switchNav('tabDialer', 'dialer/agent'); app.showToast('Key 3: Transferred to live agent on Softphone Line 1 / 2', 'success');">
-              <div class="des-ivr-badge dark-green">3</div>
-              <div>
-                <div class="des-ivr-title">Live agent</div>
-                <div class="des-ivr-desc">Transfer to the softphone queue</div>
-              </div>
-            </div>
-
-            <!-- Bottom Actions -->
-            <div style="display:flex;gap:12px;align-items:center;margin-top:28px;">
-              <button type="button" id="btnLaunchDesignerCampaign" class="des-btn-outline" onclick="app.toggleCampaignLaunch()" style="padding:10px 22px;">
-                Pause campaign
-              </button>
-              <button type="button" class="des-btn-solid-blue" onclick="switchNav('tabDialer', 'dialer/agent')">
-                Open in live softphone queue
-              </button>
-            </div>
           </div>
 
         </div>
+
+        <!-- ── SECTION C: CONTACTS (Bottom Full Width Card - Picture 1 Match) ── -->
+        <div class="des-panel" style="margin-top:20px;padding:24px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:14px;margin-bottom:18px;">
+            <div>
+              <h3 style="font-size:16px;font-weight:700;color:#0f172a;margin:0;">Contacts</h3>
+              <div id="designerContactsSubtitle" style="font-size:12px;color:#64748b;margin-top:4px;font-weight:500;">
+                8 scheduled calls
+              </div>
+            </div>
+            <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+              <input type="text" id="designerLeadSearch" class="des-clean-field" placeholder="Search contacts" style="width:170px;font-size:12.5px;" oninput="app.onDesignerContactFilterChange()">
+              
+              <!-- Status Filter Dropdown -->
+              <select id="designerContactStatusFilter" class="des-clean-field" style="width:auto;min-width:120px;font-size:12.5px;padding:7px 10px;cursor:pointer;" onchange="app.onDesignerContactFilterChange()">
+                <option value="">All Statuses</option>
+                <option value="pending">Pending</option>
+                <option value="answered">Answered</option>
+                <option value="busy">Busy</option>
+                <option value="no_answer">No answer</option>
+              </select>
+
+              <!-- Schedule Filter Dropdown -->
+              <select id="designerContactScheduleFilter" class="des-clean-field" style="width:auto;min-width:125px;font-size:12.5px;padding:7px 10px;cursor:pointer;" onchange="app.onDesignerContactFilterChange()">
+                <option value="">All Schedules</option>
+                <option value="upcoming">Upcoming / Scheduled</option>
+                <option value="today">Today / Ready</option>
+                <option value="past_due">Past due</option>
+                <option value="immediate">Immediate</option>
+              </select>
+
+              <button type="button" class="des-btn-white" onclick="app.openAddContactsModal(app.activeCampaignId || app.campaign?.id)">Add numbers</button>
+              <button type="button" class="des-btn-white" onclick="app.exportCampaignContacts(app.activeCampaignId || app.campaign?.id)">Export CSV</button>
+            </div>
+          </div>
+
+          <div style="overflow-x:auto;">
+            <table class="des-contact-table">
+              <thead>
+                <tr>
+                  <th>CUSTOMER</th>
+                  <th>PHONE</th>
+                  <th>SCHEDULED</th>
+                  <th>STATUS</th>
+                  <th>DURATION</th>
+                  <th style="text-align:right;"></th>
+                </tr>
+              </thead>
+              <tbody id="designerContactsTableBody">
+                <!-- Dynamically rendered by app.renderDesignerContactsTable() -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+
       </div>
     </div>
 
@@ -541,6 +727,26 @@ $initials      = strtoupper(substr($currentUser['username'] ?? 'A', 0, 2));
 
       <!-- ── SUB-VIEW A: AGENT SCREEN (Exact Match to Picture 2) ── -->
       <div id="subViewDialerAgent">
+        <!-- Live Real-Time Telephony Metrics Strip for Agent Screen -->
+        <div class="camp-metric-row" style="margin-bottom:18px;">
+          <div class="camp-metric-card" style="padding:14px 18px;">
+            <div class="camp-metric-lbl">Agents ready</div>
+            <div class="camp-metric-val" id="agentKpiAgentsReady">0</div>
+          </div>
+          <div class="camp-metric-card" style="padding:14px 18px;">
+            <div class="camp-metric-lbl">Dialing now</div>
+            <div class="camp-metric-val" id="agentKpiDialingNow">0</div>
+          </div>
+          <div class="camp-metric-card" style="padding:14px 18px;">
+            <div class="camp-metric-lbl" id="agentKpiAbandonRateLbl">Abandon rate &bull; target below 3%</div>
+            <div class="camp-metric-val green" id="agentKpiAbandonRate">0.0%</div>
+          </div>
+          <div class="camp-metric-card" style="padding:14px 18px;">
+            <div class="camp-metric-lbl">Avg talk time</div>
+            <div class="camp-metric-val" id="agentKpiAvgTalkTime">00:00</div>
+          </div>
+        </div>
+
         <div class="dial-grid-cols">
           
           <!-- COL 1: Customer Information Card -->
@@ -733,19 +939,19 @@ $initials      = strtoupper(substr($currentUser['username'] ?? 'A', 0, 2));
             <!-- 4 Metrics Cards -->
             <div style="display:grid;grid-template-columns:repeat(4, 1fr);gap:10px;margin-bottom:24px;">
               <div class="sc-stat-chip">
-                <div class="sc-stat-val">14</div>
+                <div class="sc-stat-val" id="pacingAgentsReady">0</div>
                 <div class="sc-stat-lbl">Agents ready</div>
               </div>
               <div class="sc-stat-chip">
-                <div class="sc-stat-val">22</div>
+                <div class="sc-stat-val" id="pacingDialingNow">0</div>
                 <div class="sc-stat-lbl">Dialing</div>
               </div>
               <div class="sc-stat-chip">
-                <div class="sc-stat-val" style="color:#0082C8;">1.8%</div>
+                <div class="sc-stat-val" id="pacingAbandonRate" style="color:#00A651;">0.0%</div>
                 <div class="sc-stat-lbl">Abandon</div>
               </div>
               <div class="sc-stat-chip">
-                <div class="sc-stat-val">03:40</div>
+                <div class="sc-stat-val" id="pacingAvgTalk">00:00</div>
                 <div class="sc-stat-lbl">Avg talk</div>
               </div>
             </div>
@@ -947,14 +1153,41 @@ $initials      = strtoupper(substr($currentUser['username'] ?? 'A', 0, 2));
          VIEW 3: CALLBACKS (Unanswered / Scheduled Callbacks)
          ======================================================== -->
     <div class="tab-panel" id="tabCallbacks">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:10px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:12px;">
         <div>
           <div style="font-size:16px;font-weight:700;color:#1e293b;">Callbacks &amp; Missed Leads</div>
-          <div style="font-size:12px;color:#64748b;">Customers requiring follow-up callbacks or redials.</div>
+          <div style="font-size:12px;color:#64748b;" id="callbacksSubtitle">Customers requiring follow-up callbacks or redials.</div>
         </div>
-        <div style="display:flex;gap:8px;">
-          <button class="btn btn-primary btn-sm" onclick="app.requeueUnansweredLeads()">Re-queue All to Queue</button>
-          <button class="btn btn-secondary btn-sm" onclick="app.exportUnansweredCsv()">Export to CSV</button>
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+          <!-- Search Input -->
+          <div style="position:relative;width:210px;">
+            <input type="text" id="callbackSearchInput" placeholder="Search callbacks &amp; leads..." oninput="app.renderUnansweredTable()"
+              style="width:100%;padding:7px 10px 7px 30px;border:1.5px solid #e2e8f0;border-radius:8px;font-size:12.5px;color:#0f172a;background:#fff;outline:none;box-sizing:border-box;">
+            <span style="position:absolute;left:10px;top:50%;transform:translateY(-50%);color:#94a3b8;font-size:12px;pointer-events:none;">🔍</span>
+          </div>
+
+          <!-- Disposition / Status Filter -->
+          <select id="callbackStatusFilter" onchange="app.renderUnansweredTable()"
+            style="padding:7px 10px;border:1.5px solid #e2e8f0;border-radius:8px;font-size:12.5px;color:#334155;background:#fff;outline:none;cursor:pointer;font-weight:500;">
+            <option value="">All Dispositions</option>
+            <option value="scheduled">Scheduled Callbacks</option>
+            <option value="completed">Completed Callbacks</option>
+            <option value="no_answer">Missed: No Answer</option>
+            <option value="busy">Missed: Busy Line</option>
+            <option value="failed">Missed: Failed</option>
+          </select>
+
+          <!-- Date / Schedule Filter -->
+          <select id="callbackDateFilter" onchange="app.renderUnansweredTable()"
+            style="padding:7px 10px;border:1.5px solid #e2e8f0;border-radius:8px;font-size:12.5px;color:#334155;background:#fff;outline:none;cursor:pointer;font-weight:500;">
+            <option value="">All Schedules</option>
+            <option value="today">Today</option>
+            <option value="past_due">Past Due</option>
+            <option value="upcoming">Upcoming</option>
+          </select>
+
+          <button class="btn btn-primary btn-sm" onclick="app.requeueUnansweredLeads()" style="padding:7px 14px;font-weight:600;">Re-queue All to Queue</button>
+          <button class="btn btn-secondary btn-sm" onclick="app.exportUnansweredCsv()" style="padding:7px 14px;font-weight:600;">Export to CSV</button>
         </div>
       </div>
 
@@ -1426,7 +1659,7 @@ $initials      = strtoupper(substr($currentUser['username'] ?? 'A', 0, 2));
         <h3>Add Contacts to Campaign</h3>
         <button type="button" class="btn-close" onclick="app.closeModal('modalUpload')">&times;</button>
       </div>
-      <form id="formUploadLeads" onsubmit="app.handleUploadSubmit(event)">
+      <form id="formUploadLeads">
         <div class="modal-body">
           <div class="form-group" style="margin-bottom:14px;">
             <label class="form-label" style="font-weight:700;color:#143522;">Target Campaign</label>
@@ -1437,21 +1670,118 @@ $initials      = strtoupper(substr($currentUser['username'] ?? 'A', 0, 2));
             <span style="font-size:12px;font-weight:600;color:#143522;">Upload Excel or CSV File</span>
             <a href="javascript:void(0)" onclick="app.closeModal('modalUpload'); app.openModal('modalManual');" style="font-size:11.5px;color:#00A651;font-weight:600;text-decoration:none;">Or Paste Numbers Directly &rarr;</a>
           </div>
-          <p style="font-size:11.5px;color:#64748b;margin-bottom:12px;">
-            Supports Excel (.xlsx, .xls) and CSV. Required columns: Name, Phone Number, Schedule.
+          <p style="font-size:12px;color:#334155;margin-bottom:10px;line-height:1.5;">
+            Supports Excel (<strong>.xlsx</strong>) and <strong>.csv</strong> with exact columns: <strong>Name, Phone Number, Time</strong>.<br>
+            <span style="font-size:11px;color:#64748b;">Example: <code>Helen Tesfaye, 0911223344, 14:30</code> (or <code>02:30 PM</code> / <code>Immediate</code>). The dialer will wait for the exact time entered.</span>
           </p>
+          <!-- Auto-Schedule Config in Modal -->
+          <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:10px 12px;margin-bottom:12px;">
+            <label style="display:flex;align-items:center;gap:8px;font-size:12px;font-weight:700;color:#166534;cursor:pointer;margin:0;">
+              <input type="checkbox" id="uploadAutoScheduleToggle" onchange="document.getElementById('uploadScheduleOptionsRow').style.display = this.checked ? 'flex' : 'none';">
+              <span>Auto-Schedule any leads without a time (stagger calls automatically)</span>
+            </label>
+            <div id="uploadScheduleOptionsRow" style="display:none;gap:10px;align-items:center;margin-top:8px;">
+              <div style="flex:1;">
+                <label style="font-size:11px;color:#374151;font-weight:600;display:block;margin-bottom:2px;">Strategy</label>
+                <select id="uploadScheduleStrategy" class="form-control" style="font-size:11.5px;padding:5px 8px;" onchange="app.handleUploadStrategyChange(this.value)">
+                  <option value="interval" selected>Interval Staggering</option>
+                  <option value="window">Business Hours Window</option>
+                  <option value="batch">Wave / Batch Sizing</option>
+                </select>
+              </div>
+              <div id="uploadColInterval" style="flex:1;">
+                <label id="uploadLblInterval" style="font-size:11px;color:#374151;font-weight:600;display:block;margin-bottom:2px;">Stagger Interval</label>
+                <select id="uploadScheduleInterval" class="form-control" style="font-size:11.5px;padding:5px 8px;">
+                  <option value="2">Every 2 mins</option>
+                  <option value="5" selected>Every 5 mins (Recommended)</option>
+                  <option value="10">Every 10 mins</option>
+                  <option value="15">Every 15 mins</option>
+                </select>
+              </div>
+              <div id="uploadColWindow" style="flex:1;display:none;">
+                <label style="font-size:11px;color:#374151;font-weight:600;display:block;margin-bottom:2px;">Business Hours Window</label>
+                <div style="display:flex;gap:5px;align-items:center;">
+                  <input type="time" id="uploadWindowStart" value="09:00" class="form-control" style="font-size:11.5px;padding:4px 6px;flex:1;">
+                  <span style="font-size:11px;color:#64748b;">to</span>
+                  <input type="time" id="uploadWindowEnd" value="17:00" class="form-control" style="font-size:11.5px;padding:4px 6px;flex:1;">
+                </div>
+              </div>
+              <div id="uploadColBatch" style="flex:1;display:none;">
+                <label style="font-size:11px;color:#374151;font-weight:600;display:block;margin-bottom:2px;">Batch Size</label>
+                <select id="uploadBatchSize" class="form-control" style="font-size:11.5px;padding:5px 8px;">
+                  <option value="2">2 per wave</option>
+                  <option value="5" selected>5 per wave</option>
+                  <option value="10">10 per wave</option>
+                  <option value="20">20 per wave</option>
+                </select>
+              </div>
+            </div>
+            <div id="uploadWindowHelpText" style="display:none;font-size:11px;color:#166534;margin-top:6px;background:#e8f5e9;padding:4px 8px;border-radius:4px;">
+              System will evenly distribute calls across these business hours automatically.
+            </div>
+          </div>
           <div class="dropzone-box" id="dropzoneBox" onclick="document.getElementById('leadFileInput').click()">
-            <div style="font-size:32px;margin-bottom:6px;">📊</div>
-            <div style="font-weight:700;color:#1e293b;margin-bottom:4px;">Click to select Excel or CSV file</div>
+            <div style="font-weight:700;color:#1e293b;margin-bottom:4px;">Click to select Excel (.xlsx) or CSV file</div>
             <div style="font-size:11px;color:#64748b;" id="selectedFileName">No file selected</div>
             <input type="file" id="leadFileInput" accept=".csv,.txt,.xlsx,.xls" style="display:none;" onchange="app.handleFileSelect(this)">
           </div>
         </div>
         <div class="modal-footer">
           <button type="button" class="btn btn-secondary" onclick="app.closeModal('modalUpload')">Cancel</button>
-          <button type="submit" class="btn btn-primary">Import Numbers to Campaign</button>
+          <button type="submit" id="btnSubmitUploadLeads" class="btn btn-primary">Import Numbers to Campaign</button>
         </div>
       </form>
+    </div>
+  </div>
+
+  <!-- MODAL: CAMPAIGN CREATED NEXT STEPS FLOW -->
+  <div id="modalCampaignCreated" class="modal-backdrop">
+    <div class="modal-dialog" style="max-width:480px;">
+      <div class="modal-header" style="background:#f0fdf4;border-bottom:1px solid #bbf7d0;">
+        <div style="display:flex;align-items:center;gap:10px;">
+          <span style="width:28px;height:28px;border-radius:50%;background:#22c55e;color:#fff;display:inline-flex;align-items:center;justify-content:center;font-weight:700;">&#10003;</span>
+          <h3 style="margin:0;color:#15803d;font-size:16px;">Campaign Created Successfully!</h3>
+        </div>
+        <button type="button" class="btn-close" onclick="app.closeModal('modalCampaignCreated')">&times;</button>
+      </div>
+      <div class="modal-body" style="padding:20px;">
+        <div style="font-size:14px;font-weight:700;color:#0f172a;margin-bottom:4px;" id="modalCreatedCampTitle">Campaign Name</div>
+        <div style="font-size:12.5px;color:#64748b;margin-bottom:18px;">
+          Follow the defined flow below to upload scheduled contacts and launch the dialer:
+        </div>
+
+        <div style="display:flex;flex-direction:column;gap:10px;">
+          <!-- Action 1: Upload Excel/CSV -->
+          <div onclick="app.flowUploadContacts()" style="display:flex;align-items:center;justify-content:space-between;padding:14px 16px;background:#f8fafc;border:1.5px solid #e2e8f0;border-radius:8px;cursor:pointer;transition:all 0.15s ease;" onmouseover="this.style.borderColor='#00A651';this.style.background='#f0fdf4';" onmouseout="this.style.borderColor='#e2e8f0';this.style.background='#f8fafc';">
+            <div>
+              <div style="font-weight:700;font-size:13.5px;color:#0f172a;">1. Upload Contacts &amp; Schedule</div>
+              <div style="font-size:11.5px;color:#64748b;">Import Excel (.xlsx) or CSV with Name, Phone Number, and Time.</div>
+            </div>
+            <span style="color:#00A651;font-weight:700;font-size:13px;">Upload &rarr;</span>
+          </div>
+
+          <!-- Action 2: Go to Dialer & Start Calling -->
+          <div onclick="app.flowGoToDialer()" style="display:flex;align-items:center;justify-content:space-between;padding:14px 16px;background:#f8fafc;border:1.5px solid #e2e8f0;border-radius:8px;cursor:pointer;transition:all 0.15s ease;" onmouseover="this.style.borderColor='#0284c7';this.style.background='#f0f9ff';" onmouseout="this.style.borderColor='#e2e8f0';this.style.background='#f8fafc';">
+            <div>
+              <div style="font-weight:700;font-size:13.5px;color:#0f172a;">2. Go to Dialer &amp; Outbound Lines</div>
+              <div style="font-size:11.5px;color:#64748b;">View active lines, review scheduled queue, and hit Start Auto-Dialer.</div>
+            </div>
+            <span style="color:#0284c7;font-weight:700;font-size:13px;">Dialer &rarr;</span>
+          </div>
+
+          <!-- Action 3: Message & Audio Designer -->
+          <div onclick="app.flowGoToDesigner()" style="display:flex;align-items:center;justify-content:space-between;padding:14px 16px;background:#f8fafc;border:1.5px solid #e2e8f0;border-radius:8px;cursor:pointer;transition:all 0.15s ease;" onmouseover="this.style.borderColor='#64748b';this.style.background='#f1f5f9';" onmouseout="this.style.borderColor='#e2e8f0';this.style.background='#f8fafc';">
+            <div>
+              <div style="font-weight:700;font-size:13.5px;color:#0f172a;">3. Customize Audio &amp; Message</div>
+              <div style="font-size:11.5px;color:#64748b;">Select IVR welcome audio recording or Amharic voice script.</div>
+            </div>
+            <span style="color:#475569;font-weight:700;font-size:13px;">Design &rarr;</span>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer" style="background:#f8fafc;">
+        <button type="button" class="btn btn-secondary" onclick="app.closeModal('modalCampaignCreated')">Close</button>
+      </div>
     </div>
   </div>
 
@@ -1462,7 +1792,7 @@ $initials      = strtoupper(substr($currentUser['username'] ?? 'A', 0, 2));
         <h3>Bulk Write Numbers to Campaign</h3>
         <button type="button" class="btn-close" onclick="app.closeModal('modalManual')">&times;</button>
       </div>
-      <form id="formManualLeads" onsubmit="app.handleManualSubmit(event)">
+      <form id="formManualLeads">
         <div class="modal-body">
           <div class="form-group" style="margin-bottom:14px;">
             <label class="form-label" style="font-weight:700;color:#143522;">Target Campaign</label>
@@ -1473,10 +1803,56 @@ $initials      = strtoupper(substr($currentUser['username'] ?? 'A', 0, 2));
             <span style="font-size:12px;font-weight:600;color:#143522;">Paste Phone Numbers (One per line)</span>
             <a href="javascript:void(0)" onclick="app.closeModal('modalManual'); app.openModal('modalUpload');" style="font-size:11.5px;color:#00A651;font-weight:600;text-decoration:none;">&larr; Or Upload Excel/CSV</a>
           </div>
+          <!-- Auto-Schedule Config in Manual Modal -->
+          <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:10px 12px;margin-bottom:10px;">
+            <label style="display:flex;align-items:center;gap:8px;font-size:12px;font-weight:700;color:#166534;cursor:pointer;margin:0;">
+              <input type="checkbox" id="manualAutoScheduleToggle" checked onchange="document.getElementById('manualScheduleOptionsRow').style.display = this.checked ? 'flex' : 'none';">
+              <span>System Auto-Schedule (Paste Name &amp; Phone only)</span>
+            </label>
+            <div id="manualScheduleOptionsRow" style="display:flex;gap:10px;align-items:center;margin-top:8px;">
+              <div style="flex:1;">
+                <label style="font-size:11px;color:#374151;font-weight:600;display:block;margin-bottom:2px;">Strategy</label>
+                <select id="manualScheduleStrategy" class="form-control" style="font-size:11.5px;padding:5px 8px;" onchange="app.handleManualStrategyChange(this.value)">
+                  <option value="interval" selected>Interval Staggering</option>
+                  <option value="window">Business Hours Window</option>
+                  <option value="batch">Wave / Batch Sizing</option>
+                </select>
+              </div>
+              <div id="manualColInterval" style="flex:1;">
+                <label id="manualLblInterval" style="font-size:11px;color:#374151;font-weight:600;display:block;margin-bottom:2px;">Stagger Interval</label>
+                <select id="manualScheduleInterval" class="form-control" style="font-size:11.5px;padding:5px 8px;">
+                  <option value="2">Every 2 mins</option>
+                  <option value="5" selected>Every 5 mins (Recommended)</option>
+                  <option value="10">Every 10 mins</option>
+                  <option value="15">Every 15 mins</option>
+                </select>
+              </div>
+              <div id="manualColWindow" style="flex:1;display:none;">
+                <label style="font-size:11px;color:#374151;font-weight:600;display:block;margin-bottom:2px;">Business Hours Window</label>
+                <div style="display:flex;gap:5px;align-items:center;">
+                  <input type="time" id="manualWindowStart" value="09:00" class="form-control" style="font-size:11.5px;padding:4px 6px;flex:1;">
+                  <span style="font-size:11px;color:#64748b;">to</span>
+                  <input type="time" id="manualWindowEnd" value="17:00" class="form-control" style="font-size:11.5px;padding:4px 6px;flex:1;">
+                </div>
+              </div>
+              <div id="manualColBatch" style="flex:1;display:none;">
+                <label style="font-size:11px;color:#374151;font-weight:600;display:block;margin-bottom:2px;">Batch Size</label>
+                <select id="manualBatchSize" class="form-control" style="font-size:11.5px;padding:5px 8px;">
+                  <option value="2">2 per wave</option>
+                  <option value="5" selected>5 per wave</option>
+                  <option value="10">10 per wave</option>
+                  <option value="20">20 per wave</option>
+                </select>
+              </div>
+            </div>
+            <div id="manualWindowHelpText" style="display:none;font-size:11px;color:#166534;margin-top:6px;background:#e8f5e9;padding:4px 8px;border-radius:4px;">
+              System will evenly distribute calls across these business hours automatically.
+            </div>
+          </div>
           <p style="font-size:11.5px;color:#64748b;margin-bottom:8px;">
-            Format: <code>0911223344</code>, or <code>Helen Tesfaye, 0911223344, 02:30 PM</code>
+            Format: <code>0911223344</code>, or <code>Helen Tesfaye, 0911223344</code>, or <code>Abebe, 0922334455, 02:30 PM</code>
           </p>
-          <textarea id="manualLeadsText" class="form-control" rows="8" placeholder="0911223344&#10;Helen Tesfaye, 0911223344, 12:00 PM&#10;Abebe Kebede, 0922334455, 02:30 PM" required style="font-family:monospace;font-size:12px;"></textarea>
+          <textarea id="manualLeadsText" class="form-control" rows="8" placeholder="0911223344&#10;Helen Tesfaye, 0911223344&#10;Abebe Kebede, 0922334455" required style="font-family:monospace;font-size:12px;"></textarea>
         </div>
         <div class="modal-footer">
           <button type="button" class="btn btn-secondary" onclick="app.closeModal('modalManual')">Cancel</button>
@@ -1497,19 +1873,19 @@ $initials      = strtoupper(substr($currentUser['username'] ?? 'A', 0, 2));
         <input type="hidden" id="campActionMenuCampaignId">
         <div style="display:flex;flex-direction:column;gap:8px;">
           <button type="button" class="btn btn-primary" onclick="app.actionMenuDialCampaign()" style="justify-content:flex-start;padding:10px 14px;font-weight:600;font-size:13px;">
-            <span style="margin-right:8px;">🚀</span> Load &amp; Dial in Outbound Queue
+            Load &amp; Dial in Outbound Queue
           </button>
           <button type="button" class="btn btn-secondary" onclick="app.actionMenuAddContacts()" style="justify-content:flex-start;padding:10px 14px;font-size:13px;">
-            <span style="margin-right:8px;">📥</span> + Add Numbers / Import Contacts
+            + Add Numbers / Import Contacts
           </button>
           <button type="button" class="btn btn-secondary" onclick="app.actionMenuExportContacts()" style="justify-content:flex-start;padding:10px 14px;font-size:13px;">
-            <span style="margin-right:8px;">📤</span> Export Contacts (CSV)
+            Export Contacts (CSV)
           </button>
           <button type="button" class="btn btn-secondary" onclick="app.actionMenuToggleStatus()" style="justify-content:flex-start;padding:10px 14px;font-size:13px;">
-            <span style="margin-right:8px;">⏸️</span> Toggle Running / Idle Status
+            Toggle Running / Idle Status
           </button>
           <button type="button" class="btn btn-secondary" onclick="app.actionMenuDeleteCampaign()" style="justify-content:flex-start;padding:10px 14px;font-size:13px;color:#dc2626;border-color:#fecaca;">
-            <span style="margin-right:8px;">🗑️</span> Delete Campaign
+            Delete Campaign
           </button>
         </div>
       </div>
@@ -1523,7 +1899,7 @@ $initials      = strtoupper(substr($currentUser['username'] ?? 'A', 0, 2));
         <h3>Upload Voice Recording (.wav / .mp3)</h3>
         <button type="button" class="btn-close" onclick="app.closeModal('modalAudioUpload')">&times;</button>
       </div>
-      <form id="formUploadAudio" onsubmit="app.handleAudioUploadSubmit(event)">
+      <form id="formUploadAudio">
         <div class="modal-body">
           <div class="form-group" style="margin-bottom:12px;">
             <label class="form-label">Recording Title</label>
@@ -1546,8 +1922,8 @@ $initials      = strtoupper(substr($currentUser['username'] ?? 'A', 0, 2));
   <div id="modalRedialSchedule" class="modal-backdrop">
     <div class="modal-dialog" style="max-width:440px;">
       <div class="modal-header">
-        <h3 style="display:flex;align-items:center;gap:8px;font-size:16px;">
-          <span>📅</span> Schedule Redial Date &amp; Time
+        <h3 style="font-size:16px;font-weight:700;color:#0f172a;">
+          Schedule Redial Date &amp; Time
         </h3>
         <button type="button" class="btn-close" onclick="app.closeModal('modalRedialSchedule')">&times;</button>
       </div>
@@ -1572,8 +1948,8 @@ $initials      = strtoupper(substr($currentUser['username'] ?? 'A', 0, 2));
 
           <!-- Small Calendar & Time Pickers -->
           <div style="background:#f8fafc;border:1.5px solid #cbd5e1;border-radius:10px;padding:14px;margin-bottom:14px;">
-            <div style="font-size:12px;font-weight:700;color:#0f172a;margin-bottom:10px;display:flex;align-items:center;gap:6px;">
-              <span>🗓️</span> Pick from Calendar &amp; Clock:
+            <div style="font-size:12px;font-weight:700;color:#0f172a;margin-bottom:10px;">
+              Pick from Calendar &amp; Clock:
             </div>
             <div style="display:grid;grid-template-columns:1.25fr 1fr;gap:10px;margin-bottom:10px;">
               <div>
@@ -1602,8 +1978,8 @@ $initials      = strtoupper(substr($currentUser['username'] ?? 'A', 0, 2));
   <div id="modalRescheduleCallback" class="modal-backdrop">
     <div class="modal-dialog" style="max-width:440px;">
       <div class="modal-header">
-        <h3 style="display:flex;align-items:center;gap:8px;font-size:16px;">
-          <span>📅</span> Choose Callback Date &amp; Time
+        <h3 style="font-size:16px;font-weight:700;color:#0f172a;">
+          Choose Callback Date &amp; Time
         </h3>
         <button type="button" class="btn-close" onclick="app.closeModal('modalRescheduleCallback')">&times;</button>
       </div>
@@ -1628,8 +2004,8 @@ $initials      = strtoupper(substr($currentUser['username'] ?? 'A', 0, 2));
 
           <!-- Small Calendar & Time Pickers -->
           <div style="background:#f8fafc;border:1.5px solid #cbd5e1;border-radius:10px;padding:14px;margin-bottom:14px;">
-            <div style="font-size:12px;font-weight:700;color:#0f172a;margin-bottom:10px;display:flex;align-items:center;gap:6px;">
-              <span>🗓️</span> Pick from Calendar &amp; Clock:
+            <div style="font-size:12px;font-weight:700;color:#0f172a;margin-bottom:10px;">
+              Pick from Calendar &amp; Clock:
             </div>
             <div style="display:grid;grid-template-columns:1.25fr 1fr;gap:10px;margin-bottom:10px;">
               <div>

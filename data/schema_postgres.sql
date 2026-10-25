@@ -39,9 +39,34 @@ CREATE TABLE IF NOT EXISTS campaigns (
     max_concurrent INT DEFAULT 50,
     total_leads INT DEFAULT 0,
     completed_leads INT DEFAULT 0,
+    calling_method VARCHAR(50) DEFAULT 'manual', -- manual, auto_schedule
+    schedule_strategy VARCHAR(50) DEFAULT 'interval', -- interval, window, batch
+    schedule_interval_mins INT DEFAULT 5,
+    schedule_window_start VARCHAR(20) DEFAULT '09:00',
+    schedule_window_end VARCHAR(20) DEFAULT '17:00',
+    schedule_batch_size INT DEFAULT 5,
+    schedule_start_time VARCHAR(50) DEFAULT 'now',
     created_by VARCHAR(100) DEFAULT 'Agent1',
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 2b. Ethio Telecom Inbound API Logs
+CREATE TABLE IF NOT EXISTS ethio_telecom_api_logs (
+    id SERIAL PRIMARY KEY,
+    batch_id VARCHAR(100) NOT NULL,
+    campaign_id INT,
+    ip_address VARCHAR(50),
+    total_received INT DEFAULT 0,
+    imported_count INT DEFAULT 0,
+    duplicates_count INT DEFAULT 0,
+    invalid_count INT DEFAULT 0,
+    dnc_blocked_count INT DEFAULT 0,
+    schedule_mode VARCHAR(50) DEFAULT 'auto',
+    status VARCHAR(50) DEFAULT 'success',
+    error_message TEXT DEFAULT '',
+    payload_sample TEXT DEFAULT '',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
 -- 3. Customer Leads Queue (Optimized for FOR UPDATE SKIP LOCKED)
