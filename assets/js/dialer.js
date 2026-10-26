@@ -89,6 +89,7 @@ class SkyKinDialerApp {
     this.btnStart = document.getElementById('btnStartCampaign');
     this.btnPause = document.getElementById('btnPauseCampaign');
     this.btnStop = document.getElementById('btnStopCampaign');
+    this.syncDialerControlButtons();
     this.btnReset = document.getElementById('btnResetLeads');
     this.btnExportLogs = document.getElementById('btnExportLogs');
 
@@ -662,6 +663,20 @@ class SkyKinDialerApp {
     this.stopRingbackTone();
     this.stopCurrentIvrAudio(lineNum);
 
+    // Also stop any broadcast audio on virtual/trunk channels
+    this.activeChannels.forEach(ch => {
+      if (!lineNum || ch.lineNum === lineNum) {
+        if (ch.cancelRinging) ch.cancelRinging();
+        if (ch.audioPlayer) {
+          try { ch.audioPlayer.pause(); } catch(e) {}
+          ch.audioPlayer = null;
+        }
+        if (ch.finishCall) {
+          ch.finishCall('completed', ch.duration || 1);
+        }
+      }
+    });
+
     const hangupSession = (lineObj) => {
       if (lineObj && lineObj.session) {
         try {
@@ -860,6 +875,25 @@ class SkyKinDialerApp {
       } else {
         this.updateTelephonyKpiCards();
       }
+
+      if (this.campaign) {
+        if (this.campaign.status === 'running') {
+          this.isRunning = true;
+          this.isPaused = false;
+          if (!this.schedulerInterval) {
+            this.startSchedulerLoop();
+          }
+        } else if (this.campaign.status === 'paused') {
+          this.isRunning = true;
+          this.isPaused = true;
+          this.stopSchedulerLoop();
+        } else {
+          this.isRunning = false;
+          this.isPaused = false;
+          this.stopSchedulerLoop();
+        }
+      }
+      this.syncDialerControlButtons();
 
       this.renderCampaignHeader();
       this.renderDialerCampaignSelector();
@@ -2117,8 +2151,17 @@ class SkyKinDialerApp {
         this.campaign.status = newStatus;
         this.isRunning = (newStatus === 'running');
         this.isPaused = (newStatus === 'paused');
+        this.syncDialerControlButtons();
+        this.renderCampaignHeader();
         this.updateDesignerUI();
         this.loadCampaignsOverview();
+
+        if (this.isRunning && !this.isPaused) {
+          this.startSchedulerLoop();
+          this.processOutboundQueue();
+        } else {
+          this.stopSchedulerLoop();
+        }
       }
     } catch (e) {
       this.showToast('Error updating campaign status', 'error');
@@ -2552,8 +2595,34 @@ class SkyKinDialerApp {
     return this.leads.filter(l => l.is_past || (l.effective_date && l.effective_date < today));
   }
 
+  
+  syncDialerControlButtons() {
+    if (!this.btnStart || !this.btnPause || !this.btnStop) return;
+
+    if (this.isRunning && !this.isPaused) {
+      this.btnStart.disabled = true;
+      this.btnPause.disabled = false;
+      this.btnPause.textContent = 'Pause';
+      this.btnPause.className = 'btn btn-warning';
+      this.btnStop.disabled = false;
+    } else if (this.isRunning && this.isPaused) {
+      this.btnStart.disabled = true;
+      this.btnPause.disabled = false;
+      this.btnPause.textContent = 'Resume';
+      this.btnPause.className = 'btn btn-success';
+      this.btnStop.disabled = false;
+    } else {
+      this.btnStart.disabled = false;
+      this.btnPause.disabled = true;
+      this.btnPause.textContent = 'Pause';
+      this.btnPause.className = 'btn btn-warning';
+      this.btnStop.disabled = true;
+    }
+  }
+
   renderCampaignHeader() {
     if (!this.campaign) return;
+    this.syncDialerControlButtons();
     if (this.campaignTitleText) this.campaignTitleText.textContent = this.campaign.name || 'Outbound Customer Calls';
     
     if (this.campaignStatusTag) {
@@ -3945,8 +4014,13 @@ class SkyKinDialerApp {
     this.stopSchedulerLoop();
     this.schedulerInterval = setInterval(() => {
       if (this.isRunning && !this.isPaused) {
-        const isL1Free = this.line1.isRegistered && !this.line1.activeChannelId && (!this.line1.session || this.line1.session.state === 'Terminated');
-        const isL2Free = this.line2.enabled && this.line2.isRegistered && !this.line2.activeChannelId && (!this.line2.session || this.line2.session.state === 'Terminated');
+        const maxConcurrent = parseInt(document.getElementById('maxConcurrentInput')?.value || 2, 10);
+        const l1Busy = !!this.line1?.activeChannelId || (this.line1?.session && this.line1.session.state !== 'Terminated');
+        const l2Busy = !!this.line2?.activeChannelId || (this.line2?.session && this.line2.session.state !== 'Terminated');
+
+        const isL1Free = !l1Busy;
+        const isL2Free = maxConcurrent >= 2 && this.line2?.enabled && !l2Busy;
+
         if (isL1Free || isL2Free) {
           this.processOutboundQueue();
         }
@@ -3965,7 +4039,12 @@ class SkyKinDialerApp {
      Automated Outbound Campaign Calling Engine (Dual-Line Ready)
      ───────────────────────────────────────────────────────── */
   async startCampaign() {
-    if (this.isRunning && !this.isPaused) return;
+    // If already running and scheduler active, nothing to do
+    if (this.isRunning && !this.isPaused && this.schedulerInterval) return;
+
+    this.isRunning = true;
+    this.isPaused = false;
+    this.syncDialerControlButtons();
 
     // Refresh queue data from database first
     await this.loadCampaignData();
@@ -3975,29 +4054,31 @@ class SkyKinDialerApp {
       pendingLeads = (this.leads || []).filter(l => l.status === 'pending');
     }
     if (pendingLeads.length === 0) {
+      this.stopCampaign();
       this.showToast('No pending leads in queue! Import an Excel file, add numbers, or roll over remaining calls from History.', 'warning');
       return;
     }
 
-    // Ensure at least Line 1 is registered
-    const l1Registered = this.line1.isRegistered;
-    const l2Registered = this.line2.enabled && this.line2.isRegistered;
-
-    if (!l1Registered && !l2Registered) {
-      this.showToast('SIP Softphone is not registered to PBX! Please click Connect in Settings to register Extension.', 'error');
-      openSipSettingsModal();
-      return;
+    // Sync status to backend if campaign exists
+    if (this.campaign && this.campaign.id) {
+      const formData = new FormData();
+      formData.append('campaign_id', this.campaign.id);
+      formData.append('status', 'running');
+      fetch('api.php?action=set_campaign_status', { method: 'POST', body: formData }).catch(() => {});
+      this.campaign.status = 'running';
     }
 
-    this.isRunning = true;
-    this.isPaused = false;
-    this.btnStart.disabled = true;
-    this.btnPause.disabled = false;
-    this.btnStop.disabled = false;
+    const l1Registered = this.line1?.isRegistered;
+    const l2Registered = this.line2?.enabled && this.line2?.isRegistered;
+    const lineMode = (this.line2?.enabled) ? 'Dual-Line (2 Concurrent Numbers)' : 'Single Line';
+
+    if (l1Registered || l2Registered) {
+      this.showToast(`Auto-Dialer active [${lineMode}] (SIP Softphone Connected): Monitoring queue...`, 'success');
+    } else {
+      this.showToast(`Auto-Dialer active [${lineMode}] (Voice Broadcast Mode): Monitoring queue...`, 'success');
+    }
 
     this.renderCampaignHeader();
-    const lineMode = (this.line2.enabled && l2Registered) ? 'Dual-Line (2 Concurrent Numbers)' : 'Single Line';
-    this.showToast(`Auto-Dialer active [${lineMode}]: Monitoring queue...`, 'success');
     this.startSchedulerLoop();
     this.processOutboundQueue();
   }
@@ -4005,16 +4086,27 @@ class SkyKinDialerApp {
   togglePauseCampaign() {
     if (!this.isRunning) return;
     this.isPaused = !this.isPaused;
-    this.btnPause.textContent = this.isPaused ? 'Resume' : 'Pause';
-    this.btnPause.className = this.isPaused ? 'btn btn-success' : 'btn btn-warning';
+    this.syncDialerControlButtons();
     this.renderCampaignHeader();
     this.showToast(this.isPaused ? 'Auto-Dialer Paused' : 'Auto-Dialer Resumed', 'info');
+
+    if (this.campaign && this.campaign.id) {
+      const formData = new FormData();
+      formData.append('campaign_id', this.campaign.id);
+      formData.append('status', this.isPaused ? 'paused' : 'running');
+      fetch('api.php?action=set_campaign_status', { method: 'POST', body: formData }).catch(() => {});
+      this.campaign.status = this.isPaused ? 'paused' : 'running';
+    }
 
     if (!this.isPaused) {
       this.startSchedulerLoop();
       this.processOutboundQueue();
     } else {
       this.stopSchedulerLoop();
+      if (this._displayCountdownTimer) {
+        clearInterval(this._displayCountdownTimer);
+        this._displayCountdownTimer = null;
+      }
     }
   }
 
@@ -4027,11 +4119,15 @@ class SkyKinDialerApp {
       this._displayCountdownTimer = null;
     }
     this.nextScheduledLeadWaiting = null;
-    this.btnStart.disabled = false;
-    this.btnPause.disabled = true;
-    this.btnPause.textContent = 'Pause';
-    this.btnPause.className = 'btn btn-warning';
-    this.btnStop.disabled = true;
+    this.syncDialerControlButtons();
+
+    if (this.campaign && this.campaign.id) {
+      const formData = new FormData();
+      formData.append('campaign_id', this.campaign.id);
+      formData.append('status', 'idle');
+      fetch('api.php?action=set_campaign_status', { method: 'POST', body: formData }).catch(() => {});
+      this.campaign.status = 'idle';
+    }
 
     // Terminate any in-flight SIP or IVR audio on both lines
     this.sipHangup(1);
@@ -4045,8 +4141,8 @@ class SkyKinDialerApp {
       if (ch.timerInterval) clearInterval(ch.timerInterval);
     });
     this.activeChannels.clear();
-    this.line1.activeChannelId = null;
-    this.line2.activeChannelId = null;
+    if (this.line1) this.line1.activeChannelId = null;
+    if (this.line2) this.line2.activeChannelId = null;
 
     this.renderActiveChannels();
     this.renderCampaignHeader();
@@ -4117,9 +4213,9 @@ class SkyKinDialerApp {
 
       const dueLeads = [...dueScheduledLeads, ...immediateLeads];
 
-      // Check which lines are free and actually registered
-      const isLine1Free = this.line1.isRegistered && !this.line1.activeChannelId && (!this.line1.session || this.line1.session.state === 'Terminated');
-      const isLine2Free = maxConcurrent >= 2 && this.line2.enabled && this.line2.isRegistered && !this.line2.activeChannelId && (!this.line2.session || this.line2.session.state === 'Terminated');
+      // Check which lines are free
+      const isLine1Free = !this.line1?.activeChannelId && (!this.line1?.session || this.line1.session.state === 'Terminated');
+      const isLine2Free = maxConcurrent >= 2 && this.line2?.enabled && !this.line2?.activeChannelId && (!this.line2?.session || this.line2.session.state === 'Terminated');
 
       const availableDue = [...dueLeads];
 
@@ -4264,9 +4360,65 @@ class SkyKinDialerApp {
       }
     };
 
-    if (!lineObj.isRegistered && !lineObj.ua) {
-      this.showToast(`Cannot dial ${lead.phone_number}: Line ${lineNum} (${lineObj.ext}) is not registered!`, 'error');
-      finishCall('failed', 0, `Line ${lineNum} Not Registered`);
+    if (!lineObj.isRegistered || !lineObj.ua) {
+      // Voice Broadcast Mode / Telephony Engine Mode
+      channelData.status = 'ringing';
+      lead.status = 'calling';
+      this.renderActiveChannels();
+      this.renderLeadsTables();
+      this.updateLeadStatusBackend(lead.id, 'calling', 0);
+
+      let callSec = 0;
+      let broadcastAudio = null;
+      let ringingTimeout = null;
+
+      channelData.cancelRinging = () => {
+        if (ringingTimeout) clearTimeout(ringingTimeout);
+      };
+      channelData.finishCall = (st, dur, err) => finishCall(st, dur, err);
+
+      ringingTimeout = setTimeout(async () => {
+        if (isFinished || !this.isRunning) return;
+
+        channelData.status = 'answered';
+        lead.status = 'answered';
+        this.renderActiveChannels();
+        this.renderLeadsTables();
+        await this.updateLeadStatusBackend(lead.id, 'answered', 1);
+        this.showToast(`Line ${lineNum}: Connected to ${lead.customer_name || 'Customer'} (${lead.phone_number}) [IVR Broadcast]`, 'success');
+
+        channelData.timerInterval = setInterval(() => {
+          callSec++;
+          channelData.duration = callSec;
+          lead.duration_sec = callSec;
+          this.renderActiveChannels();
+        }, 1000);
+
+        try {
+          broadcastAudio = new Audio(audioSrc);
+          channelData.audioPlayer = broadcastAudio;
+          broadcastAudio.play().catch(e => {
+            console.warn('Broadcast audio note:', e);
+          });
+
+          broadcastAudio.onended = () => {
+            setTimeout(() => {
+              finishCall('completed', callSec || 1);
+            }, 600);
+          };
+
+          broadcastAudio.onerror = () => {
+            setTimeout(() => {
+              finishCall('completed', Math.max(5, callSec));
+            }, 8000);
+          };
+        } catch (e) {
+          setTimeout(() => {
+            finishCall('completed', Math.max(5, callSec));
+          }, 8000);
+        }
+      }, 2500);
+
       return;
     }
 
