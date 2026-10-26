@@ -3705,6 +3705,47 @@ class SkyKinDialerApp {
     return false;
   }
 
+  formatTo12HourAmPm(timeStr) {
+    if (!timeStr) return '';
+    const s = String(timeStr).trim();
+    if (!s || this.isImmediateCallTime(s)) return 'Immediate';
+
+    // If already contains AM or PM: normalize spacing (e.g. "09:10 AM")
+    if (/\b(AM|PM)\b/i.test(s)) {
+      return s.replace(/(\d{1,2})[:.](\d{2})\s*(AM|PM)/i, (m, h, min, ap) => {
+        const hh = String(parseInt(h, 10)).padStart(2, '0');
+        return `${hh}:${min} ${ap.toUpperCase()}`;
+      });
+    }
+
+    // ISO date + 24-hr time: "2026-10-28 17:00" or "2026-10-26 09:10"
+    const isoMatch = s.match(/^(\d{4}-\d{2}-\d{2})\s+(\d{1,2})[:.](\d{2})(?:[:.]\d{2})?/);
+    if (isoMatch) {
+      const datePart = isoMatch[1];
+      const hrs24 = parseInt(isoMatch[2], 10);
+      const mins = isoMatch[3];
+      const ampm = hrs24 >= 12 ? 'PM' : 'AM';
+      let hrs12 = hrs24 % 12;
+      if (hrs12 === 0) hrs12 = 12;
+      const hh = String(hrs12).padStart(2, '0');
+      return `${datePart} ${hh}:${mins} ${ampm}`;
+    }
+
+    // Bare 24-hr time: "17:00" or "14:10" or "09:10"
+    const timeMatch = s.match(/^(\d{1,2})[:.](\d{2})(?:[:.]\d{2})?$/);
+    if (timeMatch) {
+      const hrs24 = parseInt(timeMatch[1], 10);
+      const mins = timeMatch[2];
+      const ampm = hrs24 >= 12 ? 'PM' : 'AM';
+      let hrs12 = hrs24 % 12;
+      if (hrs12 === 0) hrs12 = 12;
+      const hh = String(hrs12).padStart(2, '0');
+      return `${hh}:${mins} ${ampm}`;
+    }
+
+    return s;
+  }
+
   getLeadScheduleInfo(lead) {
     if (!lead || !lead.call_time) {
       return {
@@ -3736,45 +3777,47 @@ class SkyKinDialerApp {
       };
     }
 
+    // Always format with 12-hour AM/PM: e.g. "2026-10-28 05:00 PM"
+    const displayTime = this.formatTo12HourAmPm(raw);
     const targetTs = this.getLeadScheduledTimestamp({ ...lead, call_time: raw });
     const now = Date.now();
 
-    // 1. Future scheduled call (e.g. tomorrow, next week, or upcoming today)
+    // 1. Future scheduled call (e.g. tomorrow, next week, or upcoming later today)
     if (targetTs > now) {
       return {
         type: 'upcoming',
         targetTs: targetTs,
         badgeClass: 'des-badge-scheduled',
-        badgeText: raw,
-        fullLabel: `${raw} · Scheduled`,
+        badgeText: displayTime,
+        fullLabel: `${displayTime} · Scheduled`,
         isDue: false,
         isFuture: true,
         isPast: false
       };
     }
 
-    // 2. Currently due for call (scheduled for today and within calling window)
-    if (this.isLeadDueForCall({ ...lead, call_time: raw })) {
+    // 2. Scheduled call that arrived right now (within 60-second current window)
+    if (targetTs > 0 && (now - targetTs) <= 60 * 1000) {
       return {
         type: 'today',
         targetTs: targetTs,
         badgeClass: 'des-badge-ready',
-        badgeText: raw,
-        fullLabel: `${raw} · Ready`,
+        badgeText: displayTime,
+        fullLabel: `${displayTime} · Ready`,
         isDue: true,
         isFuture: false,
         isPast: false
       };
     }
 
-    // 3. Past due call (scheduled time has elapsed without being dialed)
+    // 3. Past due call (scheduled time has passed by > 60 seconds without being dialed)
     if (targetTs > 0) {
       return {
         type: 'past_due',
         targetTs: targetTs,
         badgeClass: 'des-badge-pastdue',
-        badgeText: raw,
-        fullLabel: `${raw} · Past due`,
+        badgeText: displayTime,
+        fullLabel: `${displayTime} · Past due`,
         isDue: false,
         isFuture: false,
         isPast: true
@@ -3785,8 +3828,8 @@ class SkyKinDialerApp {
       type: 'immediate',
       targetTs: 0,
       badgeClass: 'des-badge-immediate',
-      badgeText: raw,
-      fullLabel: raw,
+      badgeText: displayTime,
+      fullLabel: displayTime,
       isDue: true,
       isFuture: false,
       isPast: false

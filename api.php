@@ -779,11 +779,14 @@ function normalizeScheduledTime(string $rawTime): string {
             $totalSec = (int)round($num * 86400);
             $hrs = (int)floor($totalSec / 3600);
             $mins = (int)floor(($totalSec % 3600) / 60);
-            return sprintf('%02d:%02d', $hrs, $mins);
+            $ampm = ($hrs >= 12) ? 'PM' : 'AM';
+            $hrs12 = ($hrs % 12);
+            if ($hrs12 === 0) $hrs12 = 12;
+            return sprintf('%02d:%02d %s', $hrs12, $mins, $ampm);
         }
         if ($num >= 30000 && $num < 70000) {
             $ts = ($num - 25569) * 86400;
-            return gmdate('Y-m-d H:i', (int)round($ts));
+            return gmdate('Y-m-d h:i A', (int)round($ts));
         }
     }
 
@@ -793,9 +796,19 @@ function normalizeScheduledTime(string $rawTime): string {
         $hrs = (int)$m[2];
         $mins = (int)$m[3];
         $ampm = isset($m[4]) ? strtoupper($m[4]) : '';
-        if ($ampm === 'PM' && $hrs < 12) $hrs += 12;
-        if ($ampm === 'AM' && $hrs === 12) $hrs = 0;
-        return sprintf('%s %02d:%02d', $datePart, $hrs, $mins);
+        if ($ampm === '') {
+            $ampm = ($hrs >= 12) ? 'PM' : 'AM';
+            $hrs = ($hrs % 12);
+            if ($hrs === 0) $hrs = 12;
+        } else {
+            if ($hrs > 12) {
+                $ampm = 'PM';
+                $hrs = $hrs - 12;
+            } elseif ($hrs === 0) {
+                $hrs = 12;
+            }
+        }
+        return sprintf('%s %02d:%02d %s', $datePart, $hrs, $mins, $ampm);
     }
 
     // 3. Format: "DD/MM/YYYY HH:MM AM/PM"
@@ -803,9 +816,19 @@ function normalizeScheduledTime(string $rawTime): string {
         $hrs = (int)$m[4];
         $mins = (int)$m[5];
         $ampm = isset($m[6]) ? strtoupper($m[6]) : '';
-        if ($ampm === 'PM' && $hrs < 12) $hrs += 12;
-        if ($ampm === 'AM' && $hrs === 12) $hrs = 0;
-        return sprintf('%04d-%02d-%02d %02d:%02d', (int)$m[3], (int)$m[2], (int)$m[1], $hrs, $mins);
+        if ($ampm === '') {
+            $ampm = ($hrs >= 12) ? 'PM' : 'AM';
+            $hrs = ($hrs % 12);
+            if ($hrs === 0) $hrs = 12;
+        } else {
+            if ($hrs > 12) {
+                $ampm = 'PM';
+                $hrs = $hrs - 12;
+            } elseif ($hrs === 0) {
+                $hrs = 12;
+            }
+        }
+        return sprintf('%04d-%02d-%02d %02d:%02d %s', (int)$m[3], (int)$m[2], (int)$m[1], $hrs, $mins, $ampm);
     }
 
     // 4. Format: "02:30 PM", "2:30 PM", "09:15 AM"
@@ -813,14 +836,23 @@ function normalizeScheduledTime(string $rawTime): string {
         $hrs = (int)$m[1];
         $mins = (int)$m[2];
         $ampm = strtoupper($m[4]);
-        if ($ampm === 'PM' && $hrs < 12) $hrs += 12;
-        if ($ampm === 'AM' && $hrs === 12) $hrs = 0;
-        return sprintf('%02d:%02d', $hrs, $mins);
+        if ($hrs > 12) {
+            $ampm = 'PM';
+            $hrs = $hrs - 12;
+        } elseif ($hrs === 0) {
+            $hrs = 12;
+        }
+        return sprintf('%02d:%02d %s', $hrs, $mins, $ampm);
     }
 
     // 5. Format: "14:30" or "14:30:00" or "9:15"
     if (preg_match('/^(\d{1,2})[:.](\d{2})(?:[:.](\d{2}))?$/', $s, $m)) {
-        return sprintf('%02d:%02d', (int)$m[1], (int)$m[2]);
+        $hrs = (int)$m[1];
+        $mins = (int)$m[2];
+        $ampm = ($hrs >= 12) ? 'PM' : 'AM';
+        $hrs = ($hrs % 12);
+        if ($hrs === 0) $hrs = 12;
+        return sprintf('%02d:%02d %s', $hrs, $mins, $ampm);
     }
 
     // 6. Today / Tomorrow prefix: "Today, 14:30", "Today 02:30 PM"
@@ -840,9 +872,9 @@ function normalizeScheduledTime(string $rawTime): string {
     $parsed = strtotime($s);
     if ($parsed !== false && $parsed > 0) {
         if (preg_match('/\b20\d{2}\b/', $s)) {
-            return date('Y-m-d H:i', $parsed);
+            return date('Y-m-d h:i A', $parsed);
         } else {
-            return date('H:i', $parsed);
+            return date('h:i A', $parsed);
         }
     }
 
