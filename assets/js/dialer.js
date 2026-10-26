@@ -4739,6 +4739,8 @@ class SkyKinDialerApp {
       const targetCampaignId = document.getElementById('singleAddCampaignSelect')?.value || this.activeCampaignId || this.campaign?.id || 1;
       const formData = new FormData();
       formData.append('campaign_id', targetCampaignId);
+    formData.append('client_time', Math.floor(Date.now() / 1000));
+    formData.append('client_timezone', Intl.DateTimeFormat().resolvedOptions().timeZone || 'Africa/Addis_Ababa');
       formData.append('customer_name', name);
       formData.append('phone_number', phone);
       formData.append('account_number', account);

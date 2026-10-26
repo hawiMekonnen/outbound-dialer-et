@@ -1,4 +1,5 @@
 <?php
+date_default_timezone_set(getenv('APP_TIMEZONE') ?: 'Africa/Addis_Ababa');
 /**
  * SkyKin Automatic Dialer - Backend API
  */
@@ -92,39 +93,25 @@ function extractLeadDate(?string $callTime, ?string $createdAt): string {
 function calculateSystemAutoSchedules(PDO $db, int $campaignId, int $count, array $override = []): array {
     if ($count <= 0) return [];
 
+    $tz = !empty($override['client_timezone']) ? $override['client_timezone'] : (getenv('APP_TIMEZONE') ?: 'Africa/Addis_Ababa');
+    @date_default_timezone_set($tz);
+
     $stmt = $db->prepare("SELECT * FROM campaigns WHERE id = ?");
     $stmt->execute([$campaignId]);
     $camp = $stmt->fetch() ?: [];
 
     $strategy = $override['schedule_strategy'] ?? $camp['schedule_strategy'] ?? 'interval';
-    $intervalMins = (int)($override['schedule_interval_mins'] ?? $camp['schedule_interval_mins'] ?? 5);
-    if ($intervalMins <= 0) $intervalMins = 5;
+    $intervalMins = (int)($override['schedule_interval_mins'] ?? $camp['schedule_interval_mins'] ?? 2);
+    if ($intervalMins <= 0) $intervalMins = 2;
     $winStart = $override['schedule_window_start'] ?? $camp['schedule_window_start'] ?? '09:00';
     $winEnd = $override['schedule_window_end'] ?? $camp['schedule_window_end'] ?? '17:00';
     $batchSize = (int)($override['schedule_batch_size'] ?? $camp['schedule_batch_size'] ?? 5);
     if ($batchSize <= 0) $batchSize = 5;
 
-    $now = time();
-    $todayDate = date('Y-m-d');
-    $baseTs = $now + 60; // Start 1 min in the future
-
-    // Append after the latest scheduled pending lead today to prevent collisions
-    $stmtPending = $db->prepare("SELECT call_time FROM leads WHERE campaign_id = ? AND status = 'pending' AND call_time != 'Immediate' ORDER BY id DESC LIMIT 20");
-    $stmtPending->execute([$campaignId]);
-    $lastCallTimes = $stmtPending->fetchAll(PDO::FETCH_COLUMN);
-
-    $latestPendingTs = 0;
-    foreach ($lastCallTimes as $ct) {
-        $cleanTime = str_replace(['Today,', 'Today'], '', $ct);
-        $ts = @strtotime($todayDate . ' ' . trim($cleanTime));
-        if ($ts && $ts > $latestPendingTs) {
-            $latestPendingTs = $ts;
-        }
-    }
-
-    if ($latestPendingTs > $now && $strategy === 'interval') {
-        $baseTs = $latestPendingTs + ($intervalMins * 60);
-    }
+    // Start at the present moment!
+    $now = !empty($override['client_time']) ? (int)$override['client_time'] : time();
+    $todayDate = date('Y-m-d', $now);
+    $baseTs = $now;
 
     $schedules = [];
 
@@ -133,11 +120,11 @@ function calculateSystemAutoSchedules(PDO $db, int $campaignId, int $count, arra
         $endWindowTs = strtotime($todayDate . ' ' . $winEnd);
 
         if ($now > $endWindowTs) {
-            $tomorrow = date('Y-m-d', strtotime('+1 day'));
+            $tomorrow = date('Y-m-d', strtotime('+1 day', $now));
             $startWindowTs = strtotime($tomorrow . ' ' . $winStart);
             $endWindowTs = strtotime($tomorrow . ' ' . $winEnd);
         } elseif ($now > $startWindowTs) {
-            $startWindowTs = $now + 120;
+            $startWindowTs = $now;
         }
 
         $windowDuration = max(60, $endWindowTs - $startWindowTs);
@@ -147,7 +134,7 @@ function calculateSystemAutoSchedules(PDO $db, int $campaignId, int $count, arra
             $ts = $startWindowTs + ($i * $step);
             $timePart = date('h:i A', $ts);
             $datePart = date('Y-m-d', $ts);
-            $schedules[] = ($datePart === $todayDate) ? "Today, {$timePart}" : date('M d, ', $ts) . $timePart;
+            $schedules[] = ($datePart === $todayDate) ? "Today, {$timePart}" : "{$datePart} {$timePart}";
         }
     } elseif ($strategy === 'batch') {
         for ($i = 0; $i < $count; $i++) {
@@ -155,15 +142,15 @@ function calculateSystemAutoSchedules(PDO $db, int $campaignId, int $count, arra
             $ts = $baseTs + ($batchIndex * $intervalMins * 60);
             $timePart = date('h:i A', $ts);
             $datePart = date('Y-m-d', $ts);
-            $schedules[] = ($datePart === $todayDate) ? "Today, {$timePart}" : date('M d, ', $ts) . $timePart;
+            $schedules[] = ($datePart === $todayDate) ? "Today, {$timePart}" : "{$datePart} {$timePart}";
         }
     } else {
-        // Interval Staggering: +intervalMins each
+        // Interval Staggering: starts at present ($baseTs = $now), +intervalMins each
         for ($i = 0; $i < $count; $i++) {
             $ts = $baseTs + ($i * $intervalMins * 60);
             $timePart = date('h:i A', $ts);
             $datePart = date('Y-m-d', $ts);
-            $schedules[] = ($datePart === $todayDate) ? "Today, {$timePart}" : date('M d, ', $ts) . $timePart;
+            $schedules[] = ($datePart === $todayDate) ? "Today, {$timePart}" : "{$datePart} {$timePart}";
         }
     }
 
@@ -1024,6 +1011,9 @@ if ($action === 'upload_leads') {
     if (!empty($_POST['schedule_window_start'])) $overrideOptions['schedule_window_start'] = trim($_POST['schedule_window_start']);
     if (!empty($_POST['schedule_window_end'])) $overrideOptions['schedule_window_end'] = trim($_POST['schedule_window_end']);
     if (!empty($_POST['schedule_batch_size'])) $overrideOptions['schedule_batch_size'] = (int)$_POST['schedule_batch_size'];
+    if (!empty($_POST['client_time'])) $overrideOptions['client_time'] = (int)$_POST['client_time'];
+    if (!empty($_POST['client_timezone'])) $overrideOptions['client_timezone'] = trim($_POST['client_timezone']);
+    $overrideOptions['start_at_present'] = true;
 
     $filePath = $_FILES['lead_file']['tmp_name'];
     $origName = $_FILES['lead_file']['name'] ?? 'leads.csv';
@@ -1210,6 +1200,9 @@ if ($action === 'save_manual_leads') {
     if (!empty($_POST['schedule_window_start'])) $overrideOptions['schedule_window_start'] = trim($_POST['schedule_window_start']);
     if (!empty($_POST['schedule_window_end'])) $overrideOptions['schedule_window_end'] = trim($_POST['schedule_window_end']);
     if (!empty($_POST['schedule_batch_size'])) $overrideOptions['schedule_batch_size'] = (int)$_POST['schedule_batch_size'];
+    if (!empty($_POST['client_time'])) $overrideOptions['client_time'] = (int)$_POST['client_time'];
+    if (!empty($_POST['client_timezone'])) $overrideOptions['client_timezone'] = trim($_POST['client_timezone']);
+    $overrideOptions['start_at_present'] = true;
 
     $lines = preg_split('/\r\n|\r|\n/', $text);
     $imported = 0;

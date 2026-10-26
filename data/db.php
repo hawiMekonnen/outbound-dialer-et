@@ -1,4 +1,5 @@
 <?php
+date_default_timezone_set(getenv('APP_TIMEZONE') ?: 'Africa/Addis_Ababa');
 /**
  * Ethio Telecom Automatic Dialer
  * Enterprise Dual-Driver Database Engine (PostgreSQL 16/18 Primary + SQLite Fallback)

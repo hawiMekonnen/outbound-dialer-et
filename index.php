@@ -1,4 +1,5 @@
 <?php
+date_default_timezone_set(getenv('APP_TIMEZONE') ?: 'Africa/Addis_Ababa');
 /**
  * SkyConnect / Ethio Telecom Automatic Outbound Dialer
  * Clean, high-performance interface with Human Voice IVR & Scheduled Call Times
