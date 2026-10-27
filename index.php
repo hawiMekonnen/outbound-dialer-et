@@ -71,13 +71,7 @@ $initials      = strtoupper(substr($currentUser['username'] ?? 'A', 0, 2));
   <div class="sc-sidebar" id="sidebarMenu">
     <!-- Brand Logo at Top of Sidebar -->
     <div class="sidebar-brand-header" onclick="switchNav('tabCampaigns', 'campaigns')">
-      <div class="sidebar-brand-card">
-        <img src="assets/images/skyconnect_icon.png?v=<?= time() ?>" alt="SkyConnect Logo" class="sidebar-brand-img">
-      </div>
-      <div class="sidebar-brand-titles">
-        <span class="sidebar-brand-title">SkyConnect</span>
-        <span class="sidebar-brand-subtitle">ETHIO TELECOM</span>
-      </div>
+      <img src="assets/images/skyconnect_full_logo.png?v=<?= time() ?>" alt="SkyConnect AI-Powered Omnichannel Contact Center" class="sidebar-brand-full">
     </div>
 
     <!-- Hidden compatibility elements to prevent JS errors -->

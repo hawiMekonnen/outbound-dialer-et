@@ -312,52 +312,23 @@ body {
 
 /* Top Sidebar Brand Logo & Identity */
 .sidebar-brand-header {
-  padding: 16px 14px 14px;
-  display: flex;
-  align-items: center;
-  gap: 11px;
-  background: linear-gradient(135deg, #1f6b39 0%, #15572e 100%);
-  cursor: pointer;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.12);
-  user-select: none;
-  flex-shrink: 0;
-}
-.sidebar-brand-card {
-  background: #ffffff;
-  padding: 4px;
-  border-radius: 8px;
+  padding: 14px 14px 12px;
   display: flex;
   align-items: center;
   justify-content: center;
-  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.2);
+  background: #ffffff !important;
+  cursor: pointer;
+  border-bottom: 1px solid #e2e8f0;
+  user-select: none;
   flex-shrink: 0;
-  width: 36px;
-  height: 36px;
-  box-sizing: border-box;
 }
-.sidebar-brand-img {
-  height: 28px;
-  width: 28px;
+.sidebar-brand-full {
+  width: 100%;
+  max-width: 195px;
+  height: auto;
+  max-height: 48px;
   object-fit: contain;
   display: block;
-}
-.sidebar-brand-titles {
-  display: flex;
-  flex-direction: column;
-  line-height: 1.15;
-}
-.sidebar-brand-title {
-  font-size: 15px;
-  font-weight: 800;
-  color: #ffffff;
-  letter-spacing: -0.2px;
-}
-.sidebar-brand-subtitle {
-  font-size: 9px;
-  font-weight: 700;
-  color: #84C341;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
 }
 
 
