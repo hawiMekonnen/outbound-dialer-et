@@ -624,7 +624,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   <div class="top-utility-bar">
     <div class="top-brand">
       <div style="background:#ffffff;padding:3px 8px;border-radius:6px;display:flex;align-items:center;">
-        <img src="assets/images/skyservice_logo.png" alt="SkyService" style="height:22px;width:auto;display:block;">
+        <img src="assets/images/skyconnect_icon.png?v=<?= time() ?>" alt="SkyConnect" style="height:24px;width:24px;object-fit:contain;display:block;">
       </div>
       <span class="top-brand-text">Ethio Telecom SkyConnect &bull; Outbound Dialer Suite</span>
     </div>
@@ -706,7 +706,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
       <!-- Right Side: Agent Sign In Form -->
       <div class="form-side">
         <div class="form-brand-wrap">
-          <img src="assets/images/skyservice_logo.png" alt="SkyService" class="form-brand-logo" style="max-height:64px;width:auto;margin-bottom:10px;">
+          <img src="assets/images/skyconnect_full_logo.png?v=<?= time() ?>" alt="SkyConnect" class="form-brand-logo" style="max-height:56px;width:auto;margin-bottom:12px;display:inline-block;">
           <div class="form-header-title">SkyConnect Agent Portal</div>
           <div class="form-header-sub">Ethio Telecom Outbound Campaign &amp; Telephony Room</div>
         </div>

@@ -72,11 +72,11 @@ $initials      = strtoupper(substr($currentUser['username'] ?? 'A', 0, 2));
     <!-- Brand Logo at Top of Sidebar -->
     <div class="sidebar-brand-header" onclick="switchNav('tabCampaigns', 'campaigns')">
       <div class="sidebar-brand-card">
-        <img src="assets/images/skyservice_logo.png" alt="SkyService Logo" class="sidebar-brand-img">
+        <img src="assets/images/skyconnect_icon.png?v=<?= time() ?>" alt="SkyConnect Logo" class="sidebar-brand-img">
       </div>
       <div class="sidebar-brand-titles">
         <span class="sidebar-brand-title">SkyConnect</span>
-        <span class="sidebar-brand-subtitle">Ethio Telecom</span>
+        <span class="sidebar-brand-subtitle">ETHIO TELECOM</span>
       </div>
     </div>
 
